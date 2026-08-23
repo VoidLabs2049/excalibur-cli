@@ -29,8 +29,13 @@ excalibur/
 │       ├── history/     # Fish shell history browser
 │       ├── proctrace/   # Process tracer/analyzer (Linux-only, cfg-gated)
 │       └── settings/    # Claude Code settings manager
-└── install/             # Fish shell integration (exh.fish, excc.fish, completions)
+└── install/             # Fish shell integration (ex.fish + exh/excc aliases)
 ```
+
+`install/ex.fish` defines `ex <module>` and is the single owner of the exit-code
+protocol (exit 0 → insert into the command line, exit 10 → insert and execute).
+`exh` (bound to Ctrl+R) and `excc` are thin aliases over it, so a new module needs
+no new fish function.
 
 `proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux.
 
@@ -40,7 +45,7 @@ excalibur/
 |--------|-----------|-------------|
 | core | `.claude/rules/core.md` | App framework: event loop, module system, main menu |
 | history | `.claude/rules/history.md` | Fish shell history browser with search, sort, clipboard |
-| proctrace | `.claude/rules/proctrace.md` | Query-driven process inspector (name/PID/port), Linux-only |
+| proctrace | `.claude/rules/proctrace.md` | Query-driven process inspector (name/PID/port), Linux-only; emits kill/journalctl/systemctl/cd |
 | settings | `.claude/rules/settings.md` | Claude Code settings profile manager: switch, copy, rename, delete, JSON key-value editor |
 
 ## Adding a New Module

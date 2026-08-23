@@ -6,6 +6,7 @@ mod systemd;
 mod ui;
 
 use crate::modules::{Module, ModuleAction, ModuleId, ModuleMetadata};
+use collector::Supervisor;
 use color_eyre::Result;
 use query::QueryEngine;
 use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect};
@@ -107,6 +108,46 @@ impl ProcessTracerModule {
         }
     }
 
+    /// Build a command from the selected process and hand it back to the shell.
+    ///
+    /// The query already resolved the parts that are hard to recall — the PID,
+    /// the systemd unit, the working directory — so emitting is just formatting.
+    /// Always `Output` (editable) rather than `OutputAndExecute`: these kill or
+    /// restart things, and the unit is worth a glance before hitting enter.
+    fn emit_from_selection(&mut self, key: char) -> ModuleAction {
+        let Some(result) = self.state.get_selected_result() else {
+            return ModuleAction::None;
+        };
+
+        let unit = match &result.process.supervisor {
+            Supervisor::Systemd { unit } => Some(unit.clone()),
+            _ => None,
+        };
+
+        let command = match key {
+            'x' => Some(format!("kill {}", result.process.pid)),
+            'c' => result
+                .working_directory
+                .as_ref()
+                .map(|dir| format!("cd {}", dir)),
+            'l' => unit.map(|u| format!("journalctl -u {} -f", u)),
+            'r' => unit.map(|u| format!("systemctl restart {}", u)),
+            _ => None,
+        };
+
+        match command {
+            Some(command) => ModuleAction::Output(command),
+            None => {
+                let reason = match key {
+                    'c' => "No working directory for this process",
+                    _ => "Not supervised by systemd",
+                };
+                self.state.set_notification(reason.to_string());
+                ModuleAction::None
+            }
+        }
+    }
+
     /// Handle key events in results mode
     fn handle_results_mode(&mut self, key: KeyEvent) -> Result<ModuleAction> {
         use ratatui::crossterm::event::KeyCode;
@@ -155,6 +196,9 @@ impl ProcessTracerModule {
                 self.state.page_down();
                 Ok(ModuleAction::None)
             }
+
+            // Emit a command built from the selected process (shell integration)
+            KeyCode::Char(c @ ('l' | 'r' | 'x' | 'c')) => Ok(self.emit_from_selection(c)),
 
             // Quit (also exits)
             KeyCode::Char('q') => Ok(ModuleAction::Exit),

@@ -47,7 +47,7 @@ main.rs (clap parse → terminal setup)
 
 - **Module trait**: All modules implement `Module` (metadata, init, handle_key_event, update, render, cleanup)
 - **Event channel**: mpsc sender/receiver decouples input thread from app logic; `AppEvent` allows deferred actions
-- **Exit codes for shell integration**: `ModuleAction::Output` → exit(0), `OutputAndExecute` → exit(10); stdout carries the command, TUI uses `/dev/tty`
+- **Exit codes for shell integration**: `ModuleAction::Output` → exit(0), `OutputAndExecute` → exit(10); stdout carries the command, TUI uses `/dev/tty`. The fish side of this protocol lives in **one** place — `install/ex.fish` (`ex <module>`); `exh`/`excc` are thin aliases over it, so a new module needs no new fish function.
 - **Platform gating**: the `proctrace` module is `#[cfg(target_os = "linux")]`-only — the `ModuleId::ProcessTracer` variant, its `manager.rs` registration, the `main.rs` subcommand, and `ModuleId::from_command_name()` arm all compile out off Linux
 
 ## How to Extend
@@ -57,6 +57,8 @@ main.rs (clap parse → terminal setup)
 3. Register it in `ModuleManager::new()` in `manager.rs`
 4. Add CLI subcommand in `main.rs` `Commands` enum and map to `ModuleId`
 5. Update `ModuleId::from_command_name()` if needed
+
+No fish work is needed — `ex <subcommand>` picks up the new module automatically.
 
 ## Testing
 
