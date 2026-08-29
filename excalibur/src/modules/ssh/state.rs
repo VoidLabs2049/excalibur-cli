@@ -536,12 +536,27 @@ impl SshState {
             return;
         }
         let alias = form.value(Field::Alias).to_string();
+
+        // Checked before the write, not after: OpenSSH stops reading a config at
+        // the first line it cannot parse, so one bad value silently disables
+        // every block below it and nothing says so until the next connection.
+        let caveat = match effective::check(&self.config, &plan.lines, &alias) {
+            effective::Verdict::Rejected(why) => {
+                self.notify(format!("Not saved -- ssh will not parse it: {why}"));
+                return;
+            }
+            // Saving still goes ahead, but silence here would turn "saves are
+            // checked" into a promise that is quietly not kept.
+            effective::Verdict::Skipped(why) => format!("   (unchecked: {why})"),
+            effective::Verdict::Ok => String::new(),
+        };
+
         match write_config(&self.config, &plan.lines) {
             Ok(backup) => {
                 self.form = None;
                 self.load_config();
                 self.select_alias(&alias);
-                self.notify(format!("Saved. Backup: {}", backup.display()));
+                self.notify(format!("Saved. Backup: {}{caveat}", backup.display()));
             }
             Err(e) => self.notify(format!("Save failed: {e}")),
         }

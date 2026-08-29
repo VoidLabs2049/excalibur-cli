@@ -114,6 +114,13 @@ different outcome.
   that was never the one meant, and nothing about them looks wrong.
 - **A rate of `None` is not a rate of zero.** `None` is "no second sample yet";
   `Some(0.0)` is a live tunnel carrying nothing, which is the interesting one.
+- **`effective::check` runs before every config write** and returns three
+  states, not a bool. `Skipped` still saves — a `Match exec` config cannot be
+  validated (running it would execute a shell command on every save) and must
+  not therefore become unsavable — so the caller has to *say* it was unchecked.
+  Its staged copy goes beside the real config and inherits its mode: ssh
+  refuses a config file it considers too open, and that refusal would surface
+  here as a bogus syntax error.
 
 ## Data flow
 
@@ -143,7 +150,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-141 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+146 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.

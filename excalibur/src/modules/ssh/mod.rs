@@ -1130,6 +1130,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_save_openssh_would_refuse_never_reaches_the_file() {
+        // ssh stops reading a config at the first line it cannot parse, so
+        // `Port abc` would silently disable every block below it. The file must
+        // stay untouched and the form must stay open on the offending value.
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("excalibur-c1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let original = "Host a\n  Port 22\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut module = SshModule::new();
+        module.state.config = SshConfig::parse(&path, original);
+        module.state.apply_filters();
+        module.state.screen = Screen::Config;
+        press(&mut module, KeyCode::Enter); // open the form
+
+        let port = form::Field::ALL
+            .iter()
+            .position(|f| *f == form::Field::Port)
+            .unwrap();
+        module.state.form.as_mut().unwrap().values[port] = "abc".into();
+        module
+            .handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("Not saved"), "got: {message}");
+        assert!(
+            message.contains("line 2"),
+            "does not name the line: {message}"
+        );
+        assert_eq!(after, original, "the broken config was written anyway");
+        assert!(
+            module.state.form.is_some(),
+            "the form closed, losing the value that needs fixing"
+        );
+    }
+
     fn meter(uptime_secs: u64, rate: Option<f64>) -> state::Meter {
         state::Meter {
             usage: supervisor::Usage {
