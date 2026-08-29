@@ -568,6 +568,46 @@ impl SshState {
         }
     }
 
+    pub fn open_new_host(&mut self) {
+        self.effective = None;
+        self.form = Some(HostForm::creating(&self.config));
+    }
+
+    /// Open a copy of the selected host, for a family that differs in one field.
+    pub fn clone_host(&mut self) {
+        let Some(&index) = self.filtered_indices.get(self.selected_index) else {
+            self.notify("No host selected");
+            return;
+        };
+        self.effective = None;
+        self.form = HostForm::cloning(&self.config, index);
+    }
+
+    /// Why a new block's alias will not do.
+    ///
+    /// A duplicate is the one that matters: OpenSSH takes the first matching
+    /// block, so the new one would be written, appear in the list, and do
+    /// absolutely nothing -- the exact silent failure this module exists to
+    /// surface, and it would be this tool creating it.
+    fn new_alias_problem(&self, form: &HostForm) -> Option<String> {
+        let alias = form.value(Field::Alias).trim();
+        if alias.is_empty() {
+            return Some("Not saved -- the host needs a name".to_string());
+        }
+        if alias.split_whitespace().count() > 1 {
+            return Some("Not saved -- one name per block here".to_string());
+        }
+        let clash = self
+            .config
+            .hosts
+            .iter()
+            .position(|host| host.patterns.iter().any(|p| p == alias))?;
+        Some(format!(
+            "Not saved -- line {} already matches `{alias}`; the new block would do nothing",
+            self.config.hosts[clash].start + 1
+        ))
+    }
+
     pub fn notify(&mut self, message: impl Into<String>) {
         self.notification = Some((message.into(), Instant::now()));
     }
@@ -584,6 +624,12 @@ impl SshState {
     /// UI shows match the file again.
     pub fn save_form(&mut self) {
         let Some(form) = &self.form else { return };
+        if form.creating
+            && let Some(problem) = self.new_alias_problem(form)
+        {
+            self.notify(problem);
+            return;
+        }
         let plan = form.plan(&self.config);
         if plan.changes.is_empty() {
             self.notify("No changes");

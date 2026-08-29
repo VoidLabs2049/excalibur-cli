@@ -122,6 +122,16 @@ impl SshModule {
                 self.state.discover_selected_host();
                 Ok(ModuleAction::None)
             }
+            // Same pair as the forward list, so one screen does not teach a
+            // different vocabulary from the other.
+            KeyCode::Char('n') => {
+                self.state.open_new_host();
+                Ok(ModuleAction::None)
+            }
+            KeyCode::Char('c') => {
+                self.state.clone_host();
+                Ok(ModuleAction::None)
+            }
             KeyCode::Enter => {
                 self.state.open_form();
                 Ok(ModuleAction::None)
@@ -1160,6 +1170,110 @@ mod tests {
             spec: spec.into(),
             host: "nowhere".into(),
         }
+    }
+
+    /// The text a save would write, without going near a file.
+    fn planned(module: &SshModule) -> String {
+        module
+            .state
+            .form
+            .as_ref()
+            .unwrap()
+            .plan(&module.state.config)
+            .lines
+            .join("\n")
+    }
+
+    #[test]
+    fn a_new_host_is_appended_and_leaves_every_existing_byte_alone() {
+        // Appending is what makes this safe: nothing above can be disturbed,
+        // and OpenSSH matches first-wins so a block at the end cannot shadow
+        // anything either.
+        let before = "Host a\n  Port 22\n";
+        let mut module = on_config_screen(before);
+        press(&mut module, KeyCode::Char('n'));
+
+        let form = module.state.form.as_mut().expect("a form opened");
+        assert!(form.creating);
+        assert_eq!(form.value(form::Field::Port), "22", "no sensible default");
+        form.values[form::Field::ALL
+            .iter()
+            .position(|f| *f == form::Field::Alias)
+            .unwrap()] = "b".into();
+
+        let after = planned(&module);
+        assert!(after.starts_with(before), "an existing byte moved");
+        assert!(after.contains("\nHost b\n"), "the block is missing");
+        assert!(
+            after.contains("  Port 22"),
+            "the file's indent was not used"
+        );
+    }
+
+    #[test]
+    fn a_clone_copies_the_fields_and_makes_you_name_it() {
+        // For families like xx-trade-wsl1..4 that differ in one field. The alias
+        // is blanked rather than guessed at, because a duplicate is inert.
+        let mut module =
+            on_config_screen("Host wsl1\n  HostName 10.0.0.5\n  User root\n  Port 2201\n");
+        press(&mut module, KeyCode::Char('c'));
+
+        let form = module.state.form.as_ref().expect("a form opened");
+        assert_eq!(form.value(form::Field::Alias), "", "the alias was carried");
+        assert_eq!(form.value(form::Field::HostName), "10.0.0.5");
+        assert_eq!(form.value(form::Field::Port), "2201");
+        assert_eq!(
+            form.cursor, 0,
+            "the cursor is not on the one field that must be filled"
+        );
+        assert!(
+            rendered(&module).contains("New host"),
+            "the pane does not say a host is being added"
+        );
+    }
+
+    #[test]
+    fn a_new_host_reusing_an_alias_is_refused_with_the_line_that_beats_it() {
+        // OpenSSH takes the first matching block, so the new one would be
+        // written, appear in the list, and do nothing at all -- and it would be
+        // this tool that created the dead block.
+        let mut module = on_config_screen("Host a\n  Port 22\nHost b\n  Port 22\n");
+        press(&mut module, KeyCode::Char('n'));
+        module.state.form.as_mut().unwrap().values[0] = "b".into();
+        module
+            .handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("line 3"), "does not name it: {message}");
+        assert!(message.contains("would do nothing"), "got: {message}");
+        assert!(module.state.form.is_some(), "the form closed on a refusal");
+    }
+
+    #[test]
+    fn a_new_host_with_no_name_is_refused() {
+        let mut module = on_config_screen("Host a\n  Port 22\n");
+        press(&mut module, KeyCode::Char('n'));
+        module
+            .handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("needs a name"), "got: {message}");
+    }
+
+    #[test]
+    fn a_gateway_on_a_new_block_is_written_as_proxyjump() {
+        // The ProxyCommand spelling exists only to preserve the ones already in
+        // the file; nothing new should be written in it.
+        let mut module = on_config_screen("Host gw\n  Port 22\n");
+        press(&mut module, KeyCode::Char('n'));
+        let form = module.state.form.as_mut().unwrap();
+        form.values[0] = "b".into();
+        form.values[form::Field::ALL
+            .iter()
+            .position(|f| *f == form::Field::Gateway)
+            .unwrap()] = "gw".into();
+        assert!(planned(&module).contains("ProxyJump gw"));
     }
 
     fn listener(port: u16, loopback: bool) -> discover::Listener {

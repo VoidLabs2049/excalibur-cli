@@ -114,6 +114,10 @@ pub struct HostForm {
     /// The `Host` header carries more than one pattern, so which one the alias
     /// field would rename is ambiguous; it is displayed read-only instead.
     pub alias_locked: bool,
+    /// This block is not in the file yet, so the save appends it rather than
+    /// editing lines in place. `host_index` then points one past the end and is
+    /// only good for excluding "self" from the candidate lists.
+    pub creating: bool,
 }
 
 impl HostForm {
@@ -155,7 +159,50 @@ impl HostForm {
             editing: None,
             other,
             alias_locked: host.patterns.len() != 1,
+            creating: false,
         })
+    }
+
+    /// A block that does not exist yet.
+    ///
+    /// Prefilled with `Port 22` and whichever `User` this config uses most --
+    /// between them that is two of the six fields on almost every host here,
+    /// and both are one keystroke to change.
+    pub fn creating(config: &SshConfig) -> Self {
+        let mut values = vec![String::new(); Field::ALL.len()];
+        values[index_of(Field::Port)] = "22".to_string();
+        values[index_of(Field::User)] = most_common(config, "User");
+        HostForm {
+            host_index: config.hosts.len(),
+            // Nothing is on disk, so every filled field is a change.
+            original: vec![String::new(); Field::ALL.len()],
+            values,
+            cursor: 0,
+            editing: None,
+            other: Vec::new(),
+            alias_locked: false,
+            creating: true,
+        }
+    }
+
+    /// A copy of an existing block, minus its alias.
+    ///
+    /// The alias is blanked rather than suffixed: two blocks sharing one makes
+    /// the second inert, which is the silent failure this module exists to
+    /// surface, so it must be typed rather than guessed at.
+    pub fn cloning(config: &SshConfig, host_index: usize) -> Option<Self> {
+        let mut form = HostForm::new(config, host_index)?;
+        form.values[index_of(Field::Alias)] = String::new();
+        form.original = vec![String::new(); Field::ALL.len()];
+        form.host_index = config.hosts.len();
+        form.alias_locked = false;
+        form.creating = true;
+        // Directives the six fields do not model belong to the block being
+        // copied from; carrying them over would write lines the form cannot
+        // show, let alone edit.
+        form.other.clear();
+        form.cursor = index_of(Field::Alias);
+        Some(form)
     }
 
     pub fn field(&self) -> Field {
@@ -228,6 +275,9 @@ impl HostForm {
     /// byte for byte, because dropping a directive here changes what ssh does
     /// and nothing reports it.
     pub fn plan(&self, config: &SshConfig) -> Plan {
+        if self.creating {
+            return self.plan_new_block(config);
+        }
         let Some(host) = config.hosts.get(self.host_index) else {
             return Plan::default();
         };
@@ -406,6 +456,96 @@ fn replace_value(line: &str, value: &str) -> String {
 
 /// Indentation to give a directive this block does not have yet, copied from
 /// the block's own lines so an inserted line does not stand out.
+impl HostForm {
+    /// Append the whole block at the end of the file.
+    ///
+    /// Appending is what makes this safe to do at all: every existing byte is
+    /// untouched by construction, so a new host cannot disturb a block it was
+    /// never meant to. OpenSSH matches first-wins, so a block at the end also
+    /// cannot shadow anything above it -- only be shadowed, which the list
+    /// already flags.
+    fn plan_new_block(&self, config: &SshConfig) -> Plan {
+        let alias = self.value(Field::Alias).trim();
+        if alias.is_empty() {
+            return Plan::default();
+        }
+        let indent = file_indent(config);
+        let mut block = vec![format!("Host {alias}")];
+        for (i, field) in Field::ALL.iter().enumerate() {
+            let value = self.values[i].trim();
+            if value.is_empty() || *field == Field::Alias {
+                continue;
+            }
+            // A gateway on a brand new block is written as ProxyJump: the
+            // ProxyCommand spelling only exists here to preserve the ones
+            // already in the file.
+            let keyword = match field {
+                Field::Gateway => "ProxyJump",
+                other => other.keyword().expect("non-header field has a keyword"),
+            };
+            block.push(format!("{indent}{keyword} {value}"));
+        }
+
+        let mut lines = config.lines.clone();
+        // Keep exactly one blank line between blocks. The file ends in an empty
+        // element whenever it ends in a newline, so appending naively gives
+        // either none or two depending on the file.
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        let at = lines.len();
+        lines.extend(block.iter().cloned());
+        // Restore the trailing newline the file had.
+        lines.push(String::new());
+
+        Plan {
+            changes: block
+                .into_iter()
+                .enumerate()
+                .map(|(offset, after)| Change::Inserted {
+                    line: at + offset,
+                    after,
+                })
+                .collect(),
+            lines,
+        }
+    }
+}
+
+/// The indent this file uses for directives, so a new block matches the rest.
+fn file_indent(config: &SshConfig) -> String {
+    config
+        .lines
+        .iter()
+        .find(|line| !line.trim().is_empty() && line.starts_with([' ', '\t']))
+        .map(|line| line[..line.len() - line.trim_start().len()].to_string())
+        .unwrap_or_else(|| "  ".to_string())
+}
+
+/// The value a config uses most for `keyword`, for prefilling a new block.
+fn most_common(config: &SshConfig, keyword: &str) -> String {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for host in &config.hosts {
+        if let Some(directive) = host.get(keyword) {
+            *counts.entry(directive.value.as_str()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        // Ties broken by the value itself so the answer does not move around
+        // between runs with the hash order.
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_default()
+}
+
+fn index_of(field: Field) -> usize {
+    Field::ALL.iter().position(|f| *f == field).unwrap()
+}
+
 fn block_indent(config: &SshConfig, start: usize, end: usize) -> String {
     config.lines[start + 1..end]
         .iter()

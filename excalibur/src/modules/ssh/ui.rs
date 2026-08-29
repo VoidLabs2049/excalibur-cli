@@ -91,7 +91,7 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             // advertises a key whose whole answer is "nothing to undo".
             let undo = if state.can_undo() { "   U: undo" } else { "" };
             format!(
-                " j/k: navigate   Enter: edit   d: ports   g: ssh -G   /: search{undo}   Esc: back{filter}"
+                " j/k: navigate   Enter: edit   n: new   c: clone   d: ports   g: ssh -G   /: search{undo}   Esc: back{filter}"
             )
         }
         Screen::Forward
@@ -446,11 +446,14 @@ fn render_effective(
 }
 
 fn render_form(state: &SshState, form: &HostForm, area: Rect, buf: &mut Buffer) {
-    let title = format!(
-        " {}{} ",
-        form.value(Field::Alias),
-        if form.is_dirty() { "  *" } else { "" }
-    );
+    let alias = form.value(Field::Alias);
+    // A new block has no alias until one is typed, and an untitled pane gives
+    // no clue that Ctrl+S is about to add a host rather than edit one.
+    let title = match (form.creating, alias.is_empty()) {
+        (true, true) => " New host ".to_string(),
+        (true, false) => format!(" New host: {alias}  * "),
+        (false, _) => format!(" {alias}{} ", if form.is_dirty() { "  *" } else { "" }),
+    };
     let block = Block::bordered()
         .title(title)
         .border_type(BorderType::Rounded)

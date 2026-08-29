@@ -122,6 +122,11 @@ different outcome.
 - **`exits_on(host)` filters by host.** kami's 8080 and thor's 8080 are
   different services; a bare port match reports one as already forwarded when
   nothing forwards it.
+- **`HostForm::creating` switches `plan()` to append a whole block.**
+  `host_index` then points one past the end and is only good for excluding
+  "self" from candidate lists. A new alias that duplicates an existing one is
+  refused at save: OpenSSH takes the first match, so the block would be written,
+  appear in the list, and do nothing.
 - **A rate of `None` is not a rate of zero.** `None` is "no second sample yet";
   `Some(0.0)` is a live tunnel carrying nothing, which is the interesting one.
 - **`effective::check` runs before every config write** and returns three
@@ -166,7 +171,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-161 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+166 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.
