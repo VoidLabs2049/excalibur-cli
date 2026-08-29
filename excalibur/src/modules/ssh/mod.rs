@@ -1,10 +1,12 @@
 mod effective;
 mod form;
+mod probe;
 mod sshconfig;
 mod state;
 mod supervisor;
 mod tunnels;
 mod ui;
+mod worker;
 
 use super::{Module, ModuleAction, ModuleId, ModuleMetadata};
 use color_eyre::Result;
@@ -270,15 +272,19 @@ impl SshModule {
         }
     }
 
-    fn handle_subscreen_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+    fn handle_dashboard_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
         match key.code {
-            KeyCode::Esc => {
-                self.state.screen = Screen::Menu;
-                Ok(ModuleAction::None)
-            }
-            KeyCode::Char('q') => Ok(ModuleAction::Exit),
-            _ => Ok(ModuleAction::None),
+            KeyCode::Esc => self.state.screen = Screen::Menu,
+            KeyCode::Char('q') => return Ok(ModuleAction::Exit),
+            KeyCode::Up | KeyCode::Char('k') => self.state.forward_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
+            KeyCode::Enter => self.state.toggle_selected_tunnel(),
+            KeyCode::Char('a') => self.state.start_all(),
+            KeyCode::Char('A') => self.state.stop_all(),
+            KeyCode::Char('r') => self.state.refresh_tunnels(),
+            _ => {}
         }
+        Ok(ModuleAction::None)
     }
 }
 
@@ -310,12 +316,13 @@ impl Module for SshModule {
             Screen::Menu => self.handle_menu_key(key_event),
             Screen::Config => self.handle_config_key(key_event),
             Screen::Forward => self.handle_forward_key(key_event),
-            _ => self.handle_subscreen_key(key_event),
+            Screen::Dashboard => self.handle_dashboard_key(key_event),
         }
     }
 
     fn update(&mut self) -> Result<()> {
         self.state.expire_notification();
+        self.state.poll_tunnels();
         Ok(())
     }
 
@@ -541,6 +548,52 @@ mod tests {
             out.contains("host27"),
             "the selected candidate scrolled out of view"
         );
+    }
+
+    fn with_tunnels(module: &mut SshModule, forwards: Vec<tunnels::Forward>) {
+        module.state.tunnels = tunnels::Tunnels {
+            profiles: vec![tunnels::Profile {
+                name: "test".into(),
+                forwards,
+            }],
+        };
+        module.state.screen = Screen::Dashboard;
+    }
+
+    fn forward(bind: &str) -> tunnels::Forward {
+        tunnels::Forward {
+            host: "nowhere".into(),
+            kind: tunnels::Kind::Local,
+            bind: bind.into(),
+            target: "127.0.0.1:1".into(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_rule_with_no_process_shows_three_dark_lights() {
+        let mut module = SshModule::new();
+        with_tunnels(&mut module, vec![forward("39001")]);
+        let out = rendered(&module);
+        assert!(out.contains("o o o"), "expected a stopped row");
+        assert!(out.contains("stopped"));
+        assert!(out.contains("0 of 1 up"));
+    }
+
+    #[test]
+    fn the_dashboard_explains_its_own_lights() {
+        // Three symbols mean nothing without saying which layer each one is.
+        let mut module = SshModule::new();
+        with_tunnels(&mut module, vec![forward("39001")]);
+        let out = rendered(&module);
+        assert!(out.contains("process / listening / path"));
+    }
+
+    #[test]
+    fn an_empty_dashboard_points_at_where_rules_come_from() {
+        let mut module = SshModule::new();
+        module.state.screen = Screen::Dashboard;
+        assert!(rendered(&module).contains("Edit tunnel profiles"));
     }
 
     #[test]

@@ -1,11 +1,19 @@
 use super::effective::{self, Effective};
 use super::form::{Field, ForwardForm, HostForm, write_config};
+use super::probe::Health;
 use super::sshconfig::{HostBlock, SshConfig};
+use super::supervisor::{self, Running};
 use super::tunnels::{Forward, Kind, Profile, Tunnels};
+use super::worker::{Job, Outcome, Slot, Worker};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// How long a save / error message stays on screen.
 const NOTIFICATION_TTL: Duration = Duration::from_secs(5);
+/// Reading /proc is cheap, but not 30 times a second.
+const SCAN_INTERVAL: Duration = Duration::from_secs(1);
+/// The end-to-end probe costs a TCP round trip per rule, so it runs rarely.
+const PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Top-level screens inside the SSH module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +85,13 @@ pub struct SshState {
     /// Index into `tunnels.all()`, so it walks profiles transparently.
     pub forward_index: usize,
     pub forward_form: Option<ForwardForm>,
+
+    /// Tunnel processes found on this machine, refreshed on a timer.
+    pub running: Vec<Running>,
+    pub health: HashMap<Slot, Health>,
+    worker: Worker,
+    last_scan: Option<Instant>,
+    last_probe: Option<Instant>,
 }
 
 impl SshState {
@@ -97,6 +112,11 @@ impl SshState {
             tunnels_error: None,
             forward_index: 0,
             forward_form: None,
+            running: Vec::new(),
+            health: HashMap::new(),
+            worker: Worker::spawn(),
+            last_scan: None,
+            last_probe: None,
         }
     }
 
@@ -376,4 +396,158 @@ impl Default for SshState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Dashboard: process discovery, probing, and start/stop.
+impl SshState {
+    /// Called every tick. Scanning /proc is cheap enough to do inline; probing
+    /// is not, so it is handed to the worker and collected when it lands.
+    pub fn poll_tunnels(&mut self) {
+        for outcome in self.worker.drain() {
+            match outcome {
+                Outcome::Started(slot, Err(e)) => {
+                    let what = self.describe(slot);
+                    self.notify(format!("{what} failed to start: {e}"));
+                }
+                Outcome::Stopped(slot, Err(e)) => {
+                    let what = self.describe(slot);
+                    self.notify(format!("{what} failed to stop: {e}"));
+                }
+                Outcome::Started(..) | Outcome::Stopped(..) => {
+                    // Reflect it immediately rather than waiting out the timer.
+                    self.last_scan = None;
+                    self.last_probe = None;
+                }
+                Outcome::Probed(results) => self.health.extend(results),
+            }
+        }
+
+        if due(self.last_scan, SCAN_INTERVAL) {
+            self.running = supervisor::scan();
+            self.last_scan = Some(Instant::now());
+            // A rule with no process has nothing left to measure. Collected
+            // first because `pid_at` borrows the state the retain would own.
+            let live: Vec<Slot> = self
+                .tunnels
+                .all()
+                .into_iter()
+                .filter(|slot| self.pid_at(*slot).is_some())
+                .collect();
+            self.health.retain(|slot, _| live.contains(slot));
+        }
+        if due(self.last_probe, PROBE_INTERVAL) {
+            self.request_probe();
+        }
+    }
+
+    pub fn request_probe(&mut self) {
+        let rules: Vec<(Slot, Forward)> = self
+            .tunnels
+            .all()
+            .into_iter()
+            .filter(|slot| self.pid_at(*slot).is_some())
+            .filter_map(|slot| Some((slot, self.tunnels.get(slot.0, slot.1)?.clone())))
+            .collect();
+        self.last_probe = Some(Instant::now());
+        if !rules.is_empty() {
+            self.worker.submit(Job::Probe(rules));
+        }
+    }
+
+    /// The process serving the rule at `slot`, if any.
+    pub fn pid_at(&self, slot: Slot) -> Option<u32> {
+        let forward = self.tunnels.get(slot.0, slot.1)?;
+        supervisor::find(&self.running, forward).map(|r| r.pid)
+    }
+
+    pub fn health_at(&self, slot: Slot) -> Health {
+        match self.pid_at(slot) {
+            None => Health::stopped(),
+            Some(_) => self
+                .health
+                .get(&slot)
+                .cloned()
+                .unwrap_or_else(Health::measuring),
+        }
+    }
+
+    pub fn selected_slot(&self) -> Option<Slot> {
+        self.tunnels.all().get(self.forward_index).copied()
+    }
+
+    /// Start the rule if it is down, stop it if it is up.
+    pub fn toggle_selected_tunnel(&mut self) {
+        let Some(slot) = self.selected_slot() else {
+            return;
+        };
+        match self.pid_at(slot) {
+            Some(pid) => {
+                self.worker.submit(Job::Stop(slot, pid));
+                self.notify("Stopping");
+            }
+            None => {
+                let Some(forward) = self.tunnels.get(slot.0, slot.1).cloned() else {
+                    return;
+                };
+                self.worker.submit(Job::Start(slot, forward));
+                self.notify("Starting");
+            }
+        }
+    }
+
+    pub fn start_all(&mut self) {
+        let mut queued = 0;
+        for slot in self.tunnels.all() {
+            if self.pid_at(slot).is_some() {
+                continue;
+            }
+            if let Some(forward) = self.tunnels.get(slot.0, slot.1).cloned() {
+                self.worker.submit(Job::Start(slot, forward));
+                queued += 1;
+            }
+        }
+        self.notify(if queued == 0 {
+            "Everything is already up".to_string()
+        } else {
+            format!("Starting {queued}")
+        });
+    }
+
+    pub fn stop_all(&mut self) {
+        let mut queued = 0;
+        for slot in self.tunnels.all() {
+            if let Some(pid) = self.pid_at(slot) {
+                self.worker.submit(Job::Stop(slot, pid));
+                queued += 1;
+            }
+        }
+        self.notify(format!("Stopping {queued}"));
+    }
+
+    pub fn refresh_tunnels(&mut self) {
+        self.running = supervisor::scan();
+        self.last_scan = Some(Instant::now());
+        self.request_probe();
+    }
+
+    /// How many rules have a process behind them.
+    pub fn live_count(&self) -> usize {
+        self.tunnels
+            .all()
+            .into_iter()
+            .filter(|slot| self.pid_at(*slot).is_some())
+            .count()
+    }
+
+    /// Names a rule in a message, so a failure says which one.
+    fn describe(&self, slot: Slot) -> String {
+        self.tunnels
+            .get(slot.0, slot.1)
+            .map(|f| f.summary())
+            .unwrap_or_else(|| "tunnel".to_string())
+    }
+}
+
+fn due(last: Option<Instant>, interval: Duration) -> bool {
+    last.is_none_or(|at| at.elapsed() >= interval)
 }

@@ -1,5 +1,6 @@
 use super::effective::Effective;
 use super::form::{Change, Editing, Field, ForwardField, ForwardForm, HostForm};
+use super::probe::{Health, Light};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Screen, SshState};
 use super::tunnels::Forward;
@@ -37,7 +38,7 @@ pub fn render(state: &SshState, area: Rect, buf: &mut Buffer) {
         Screen::Menu => render_menu(state, chunks[1], buf),
         Screen::Config => render_config(state, chunks[1], buf),
         Screen::Forward => render_forward(state, chunks[1], buf),
-        Screen::Dashboard => render_placeholder("dashboard", chunks[1], buf),
+        Screen::Dashboard => render_dashboard(state, chunks[1], buf),
     }
 
     render_help(state, chunks[2], buf);
@@ -102,7 +103,10 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
         Screen::Forward => {
             " j/k: navigate   Enter: edit   n: new   d: delete   Esc: back   q: quit".to_string()
         }
-        _ => " Esc: back to SSH menu   q: back to main menu".to_string(),
+        Screen::Dashboard => {
+            " j/k: navigate   Enter: start/stop   a: start all   A: stop all   r: refresh   Esc: back"
+                .to_string()
+        }
     };
     Paragraph::new(help)
         .block(Block::bordered().border_type(BorderType::Rounded))
@@ -161,10 +165,9 @@ fn render_menu(state: &SshState, area: Rect, buf: &mut Buffer) {
     let body = match entry.screen {
         Screen::Config => config_summary(state),
         Screen::Forward => forward_summary(state),
-        _ => vec![Line::from(Span::styled(
-            "  not implemented yet",
-            Style::default().fg(Color::DarkGray),
-        ))],
+        Screen::Dashboard => dashboard_summary(state),
+        // MENU never lists itself, so this is unreachable in practice.
+        Screen::Menu => Vec::new(),
     };
 
     Paragraph::new(body)
@@ -257,6 +260,36 @@ fn forward_summary(state: &SshState) -> Vec<Line<'static>> {
                 Style::default().fg(Color::DarkGray),
             )));
         }
+    }
+    lines
+}
+
+fn dashboard_summary(state: &SshState) -> Vec<Line<'static>> {
+    if state.tunnels.count() == 0 {
+        return vec![Line::from(Span::styled(
+            "  no forwards defined yet",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  {} of {} up", state.live_count(), state.tunnels.count()),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(""),
+    ];
+    for slot in state.tunnels.all() {
+        let Some(forward) = state.tunnels.get(slot.0, slot.1) else {
+            continue;
+        };
+        let health = state.health_at(slot);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {}  ", health.lights()),
+                Style::default().fg(light_colour(&health)),
+            ),
+            Span::raw(forward.summary()),
+        ]));
     }
     lines
 }
@@ -895,13 +928,89 @@ const EMPTY_FORWARD_HELP: &str = "\
   local  opens the port here and exits on the far side
   remote opens the port on the far side and exits here";
 
-fn render_placeholder(name: &str, area: Rect, buf: &mut Buffer) {
-    Paragraph::new(format!("\n  {name} — not implemented yet"))
-        .block(
-            Block::bordered()
-                .title(format!(" {name} "))
-                .border_type(BorderType::Rounded),
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .render(area, buf);
+fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let block = Block::bordered()
+        .title(format!(
+            " Tunnels   {} of {} up ",
+            state.live_count(),
+            state.tunnels.count()
+        ))
+        .border_type(BorderType::Rounded);
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    if state.tunnels.count() == 0 {
+        Paragraph::new("  no forwards defined -- add some under `Edit tunnel profiles`")
+            .style(Style::default().fg(Color::DarkGray))
+            .render(inner, buf);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (row, slot) in state.tunnels.all().into_iter().enumerate() {
+        let Some(forward) = state.tunnels.get(slot.0, slot.1) else {
+            continue;
+        };
+        let health = state.health_at(slot);
+        let selected = row == state.forward_index;
+
+        let mut line = vec![
+            Span::styled(
+                format!("  {}  ", health.lights()),
+                Style::default().fg(light_colour(&health)),
+            ),
+            Span::raw(format!("{:<34}", truncate(&forward.summary(), 34))),
+        ];
+        line.push(match state.pid_at(slot) {
+            Some(pid) => Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray)),
+            None => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
+        });
+
+        let mut style = Style::default();
+        if selected {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        items.push(ListItem::new(Line::from(line)).style(style));
+    }
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.forward_index));
+    StatefulWidget::render(List::new(items), chunks[0], buf, &mut list_state);
+
+    // The legend earns its space: the three lights only mean anything if you
+    // know which layer each one is.
+    let detail = state
+        .selected_slot()
+        .map(|slot| state.health_at(slot).detail)
+        .unwrap_or_default();
+    let legend = vec![
+        Line::from(Span::styled(
+            "  process / listening / path        * up   x failed   - not observable   o stopped",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            format!("  {detail}"),
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+    Paragraph::new(legend)
+        .wrap(Wrap { trim: false })
+        .render(chunks[1], buf);
+}
+
+fn light_colour(health: &Health) -> Color {
+    if health.process == Light::Off {
+        Color::DarkGray
+    } else if health.port == Light::Bad || health.path == Light::Bad {
+        Color::Red
+    } else if health.port == Light::Ok && health.path == Light::Ok {
+        Color::Green
+    } else {
+        Color::Yellow
+    }
 }
