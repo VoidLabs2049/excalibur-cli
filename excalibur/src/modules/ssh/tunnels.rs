@@ -91,12 +91,25 @@ impl Forward {
         match self.kind {
             Kind::Local => (
                 format!("listen   here             {}", self.bind),
-                format!("exit     from {}   {}", self.host, self.target),
+                format!("exit     from {}   {}", self.host, self.annotated_target()),
             ),
             Kind::Remote => (
                 format!("listen   on {}      {}", self.host, self.bind),
-                format!("exit     from here       {}", self.target),
+                format!("exit     from here       {}", self.annotated_target()),
             ),
+        }
+    }
+
+    /// `localhost` in the exit is the *far* side's localhost for `-L`, which is
+    /// the single most misread part of a forward -- so it is spelled out.
+    fn annotated_target(&self) -> String {
+        let host = self.target.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+        if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+            return self.target.clone();
+        }
+        match self.kind {
+            Kind::Local => format!("{}   (= {} itself)", self.target, self.host),
+            Kind::Remote => format!("{}   (= this machine)", self.target),
         }
     }
 
@@ -441,5 +454,52 @@ mod validation {
         let mut remote = rule("80", "localhost:8080");
         remote.kind = Kind::Remote;
         assert_eq!(remote.privileged_bind(), None);
+    }
+}
+
+#[cfg(test)]
+mod whose_localhost {
+    use super::*;
+
+    fn rule(kind: Kind, target: &str) -> Forward {
+        Forward {
+            host: "kami".into(),
+            kind,
+            bind: "6022".into(),
+            target: target.into(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_local_forward_says_localhost_means_the_far_side() {
+        // `-L 6022:localhost:22 kami` lands on kami's sshd, not this machine's.
+        // Reading the rule as "my localhost" is the usual mistake.
+        let (_, exit) = rule(Kind::Local, "localhost:22").explain();
+        assert!(exit.contains("= kami itself"), "got: {exit}");
+    }
+
+    #[test]
+    fn a_remote_forward_says_localhost_means_this_machine() {
+        let (_, exit) = rule(Kind::Remote, "127.0.0.1:3000").explain();
+        assert!(exit.contains("= this machine"), "got: {exit}");
+    }
+
+    #[test]
+    fn a_named_exit_host_needs_no_annotation() {
+        let (_, exit) = rule(Kind::Local, "10.0.0.5:9001").explain();
+        assert!(!exit.contains("(="), "got: {exit}");
+        assert!(exit.contains("10.0.0.5:9001"));
+    }
+
+    #[test]
+    fn the_annotation_is_display_only() {
+        // It must never leak into the command ssh is given.
+        let command = rule(Kind::Local, "localhost:22").command_line();
+        assert!(
+            command.contains("-L 6022:localhost:22 kami"),
+            "got: {command}"
+        );
+        assert!(!command.contains("(="));
     }
 }
