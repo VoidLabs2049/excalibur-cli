@@ -1,3 +1,4 @@
+use super::effective::{self, Effective};
 use super::form::{Field, HostForm, write_config};
 use super::sshconfig::{HostBlock, SshConfig};
 use std::time::{Duration, Instant};
@@ -65,6 +66,8 @@ pub struct SshState {
 
     /// The form for the selected host, replacing the preview pane while open.
     pub form: Option<HostForm>,
+    /// `ssh -G` output for an alias, shown instead of the raw block preview.
+    pub effective: Option<(String, Effective)>,
     pub notification: Option<(String, Instant)>,
 }
 
@@ -80,6 +83,7 @@ impl SshState {
             filtered_indices: Vec::new(),
             selected_index: 0,
             form: None,
+            effective: None,
             notification: None,
         }
     }
@@ -130,12 +134,16 @@ impl SshState {
     }
 
     pub fn host_next(&mut self) {
+        // The panel belongs to one alias; moving off it would leave a stale
+        // answer attached to a different host.
+        self.effective = None;
         if !self.filtered_indices.is_empty() {
             self.selected_index = (self.selected_index + 1) % self.filtered_indices.len();
         }
     }
 
     pub fn host_previous(&mut self) {
+        self.effective = None;
         if !self.filtered_indices.is_empty() {
             let len = self.filtered_indices.len();
             self.selected_index = (self.selected_index + len - 1) % len;
@@ -161,6 +169,23 @@ impl SshState {
         if let Some(form) = self.form.as_mut() {
             form.begin_edit(config);
         }
+    }
+
+    /// Ask ssh what it resolves for the selected host, or put the panel away.
+    pub fn toggle_effective(&mut self) {
+        let Some(alias) = self.selected_host().map(|h| h.alias().to_string()) else {
+            return;
+        };
+        if self
+            .effective
+            .as_ref()
+            .is_some_and(|(shown, _)| *shown == alias)
+        {
+            self.effective = None;
+            return;
+        }
+        let resolved = effective::resolve(&alias, &self.config.lines);
+        self.effective = Some((alias, resolved));
     }
 
     pub fn open_form(&mut self) {

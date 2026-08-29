@@ -1,3 +1,4 @@
+mod effective;
 mod form;
 mod sshconfig;
 mod state;
@@ -89,6 +90,10 @@ impl SshModule {
             }
             KeyCode::Char('/') => {
                 self.state.searching = true;
+                Ok(ModuleAction::None)
+            }
+            KeyCode::Char('g') => {
+                self.state.toggle_effective();
                 Ok(ModuleAction::None)
             }
             KeyCode::Enter => {
@@ -404,6 +409,26 @@ mod tests {
             out.contains("Port 223"),
             "edited value missing from the diff"
         );
+    }
+
+    #[test]
+    fn g_toggles_the_effective_panel() {
+        let mut module = on_config_screen("Host kami\n  Port 22\n");
+        press(&mut module, KeyCode::Char('g'));
+        assert!(module.state.effective.is_some());
+        assert!(rendered(&module).contains("ssh -G kami"));
+        press(&mut module, KeyCode::Char('g'));
+        assert!(module.state.effective.is_none());
+    }
+
+    #[test]
+    fn moving_off_a_host_drops_its_effective_panel() {
+        // Otherwise the answer for one alias stays pinned next to another.
+        let mut module = on_config_screen("Host a\n  Port 22\nHost b\n  Port 23\n");
+        press(&mut module, KeyCode::Char('g'));
+        assert!(module.state.effective.is_some());
+        press(&mut module, KeyCode::Char('j'));
+        assert!(module.state.effective.is_none());
     }
 
     #[test]

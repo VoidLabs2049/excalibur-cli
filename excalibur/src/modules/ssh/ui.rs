@@ -1,3 +1,4 @@
+use super::effective::Effective;
 use super::form::{Change, Editing, Field, HostForm};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Screen, SshState};
@@ -80,7 +81,9 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             } else {
                 format!("   filter: /{}", state.search_query)
             };
-            format!(" j/k: navigate   Enter: edit   /: search   Esc: back   q: quit{filter}")
+            format!(
+                " j/k: navigate   Enter: edit   g: ssh -G   /: search   Esc: back   q: quit{filter}"
+            )
         }
         _ => " Esc: back to SSH menu   q: back to main menu".to_string(),
     };
@@ -201,10 +204,96 @@ fn config_summary(state: &SshState) -> Vec<Line<'static>> {
 fn render_config(state: &SshState, area: Rect, buf: &mut Buffer) {
     let panes = split_panes(area);
     render_host_list(state, panes[0], buf);
-    match &state.form {
-        Some(form) => render_form(state, form, panes[1], buf),
-        None => render_host_preview(state, panes[1], buf),
+    match (&state.form, &state.effective) {
+        (Some(form), _) => render_form(state, form, panes[1], buf),
+        (None, Some((alias, resolved))) => render_effective(state, alias, resolved, panes[1], buf),
+        (None, None) => render_host_preview(state, panes[1], buf),
     }
+}
+
+/// Compare what the block says against what `ssh -G` resolves. A directive can
+/// be present and inert -- an earlier matching block already set that keyword --
+/// and this is the only place that difference becomes visible.
+fn render_effective(
+    state: &SshState,
+    alias: &str,
+    resolved: &Effective,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(error) = &resolved.error {
+        for line in error.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    match state.selected_host() {
+        Some(host) if !host.directives.is_empty() => {
+            let mut overridden = 0;
+            for directive in &host.directives {
+                // Status goes first: values vary wildly in length (a
+                // ProxyCommand wraps several lines) so a trailing column would
+                // not line up.
+                if resolved.agrees(&directive.key, &directive.value) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  [ok] ", Style::default().fg(Color::Green)),
+                        Span::raw(format!("{} {}", directive.key, directive.value)),
+                    ]));
+                } else {
+                    overridden += 1;
+                    let actual = resolved
+                        .first(&directive.key)
+                        .map(|v| format!("   ssh uses: {v}"))
+                        .unwrap_or_default();
+                    lines.push(Line::from(vec![
+                        Span::styled("  [--] ", Style::default().fg(Color::Red)),
+                        Span::styled(
+                            format!("{} {}", directive.key, directive.value),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(actual, Style::default().fg(Color::Red)),
+                    ]));
+                }
+            }
+            // A duplicated block whose values happen to match still reports
+            // every row as "in effect" -- true of the value, but not of this
+            // block. Say so, or the rows read as a clean bill of health.
+            let shadow = state.shadowing_line(host);
+            if shadow.is_some() || overridden > 0 {
+                lines.push(Line::from(""));
+                let note = match (shadow, overridden) {
+                    (Some(line), 0) => {
+                        format!("  line {line} sets the same values first; this block does nothing")
+                    }
+                    (Some(line), n) => format!("  {n} ignored; line {line} sets them first"),
+                    (None, n) => format!("  {n} ignored by an earlier matching block"),
+                };
+                lines.push(Line::from(Span::styled(
+                    note,
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
+        _ => lines.push(Line::from(Span::styled(
+            "  this block sets nothing",
+            Style::default().fg(Color::DarkGray),
+        ))),
+    }
+
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(format!(" ssh -G {alias} "))
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
 }
 
 fn render_form(state: &SshState, form: &HostForm, area: Rect, buf: &mut Buffer) {
