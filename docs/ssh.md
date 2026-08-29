@@ -2,7 +2,7 @@
 
 > 隧道仪表盘 + ssh config 结构化编辑器。
 > 2026-08-29 立项并完成第一版(PR #3)。本文是模块级设计文档,项目级定位见
-> `worklog/worklog.md`。
+> `docs/README.md`。
 
 ---
 
@@ -198,7 +198,7 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ## 9. 待落地
 
-分组内按顺序做。A / B 来自 2026-08-29 的使用反馈,优先于其余。
+共 11 项。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,优先于其余。
 
 ### A · 转发组与多选
 
@@ -338,8 +338,8 @@ yaml 是本工具自己写的、结构简单,风险低于 config,但值得对齐
 依赖已引入但目前只用在表单的单行字段上。
 **优先级最低** —— 6 字段表单已覆盖 35 个块里的 32 个,这一层是补充。
 
-**D4 · 文档** —— `.claude/rules/ssh.md`(带 `paths:` frontmatter)+ CLAUDE.md
-模块表补 ssh 一行。CLAUDE.md「Adding a New Module」的第 5、6 步对 ssh 还没做。
+~~**D4 · 文档**~~ —— 2026-08-29 完成。`.claude/rules/ssh.md`、CLAUDE.md 模块表与
+架构树、`docs/` 索引都已补上,即 CLAUDE.md「Adding a New Module」的第 5、6 步。
 
 ### 风险点
 

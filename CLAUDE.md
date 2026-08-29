@@ -11,6 +11,7 @@ cargo run                    # main menu
 cargo run -- history         # direct module entry
 cargo run -- process-tracer  # direct module entry
 cargo run -- settings        # direct module entry
+cargo run -- ssh             # direct module entry
 ```
 
 ## Architecture
@@ -28,7 +29,8 @@ excalibur/
 │       ├── manager.rs   # ModuleManager (registry, routing)
 │       ├── history/     # Fish shell history browser
 │       ├── proctrace/   # Process tracer/analyzer (Linux-only, cfg-gated)
-│       └── settings/    # Claude Code settings manager
+│       ├── settings/    # Claude Code settings manager
+│       └── ssh/         # Tunnel dashboard + ssh config editor
 └── install/             # Fish shell integration (ex.fish + exh/excc aliases)
 ```
 
@@ -37,7 +39,7 @@ protocol (exit 0 → insert into the command line, exit 10 → insert and execut
 `exh` (bound to Ctrl+R) and `excc` are thin aliases over it, so a new module needs
 no new fish function.
 
-`proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux.
+`proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux. `ssh` also reads `/proc`, but only `supervisor::scan()` is cfg-gated: elsewhere it returns an empty list, so the module still builds and shows every tunnel as stopped.
 
 ## Modules
 
@@ -47,6 +49,17 @@ no new fish function.
 | history | `.claude/rules/history.md` | Fish shell history browser with search, sort, clipboard |
 | proctrace | `.claude/rules/proctrace.md` | Query-driven process inspector (name/PID/port), Linux-only; emits kill/journalctl/systemctl/cd |
 | settings | `.claude/rules/settings.md` | Claude Code settings profile manager: switch, copy, rename, delete, JSON key-value editor |
+| ssh | `.claude/rules/ssh.md` | Port-forward dashboard (three connectivity layers) + structured `~/.ssh/config` editor |
+
+## Design docs
+
+`.claude/rules/*.md` is the map — what the files are and what bites you. The
+reasoning behind a design lives separately:
+
+| File | Contents |
+|------|----------|
+| `docs/README.md` | Project positioning, the absorption criteria, the quantitative basis, the roadmap |
+| `docs/ssh.md` | SSH module: design rationale, what shipped, the backlog, and what was deliberately cut |
 
 ## Adding a New Module
 
