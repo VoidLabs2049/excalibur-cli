@@ -1,8 +1,8 @@
+#[cfg(target_os = "linux")]
+use super::proctrace::ProcessTracerModule;
 use super::{
     Module, ModuleAction, ModuleId, ModuleMetadata, history::HistoryModule, ssh::SshModule,
 };
-#[cfg(target_os = "linux")]
-use super::proctrace::ProcessTracerModule;
 use color_eyre::Result;
 use ratatui::{buffer::Buffer, crossterm::event::KeyEvent, layout::Rect};
 use std::collections::HashMap;
