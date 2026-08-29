@@ -196,7 +196,7 @@ CLI:`ex ssh` / 简写 `ex t`。
    + problem() 规则校验 + 出口裸端口展开 + 方向图解
 ✅ supervisor.rs:按 argv 结构认领 + 起(-f -N)/ 停(按 pid)
 ✅ probe.rs:三层灯 + 后台 worker 线程
-✅ 仪表盘 a 全起 / A 全停 / r 刷新
+✅ 仪表盘 a 全起 / A 全停 / r 刷新 / HTTP 服务按 `o` 打开浏览器、`y` 复制地址
 ```
 
 ## 9. 落地记录

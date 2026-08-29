@@ -232,13 +232,27 @@ impl Tunnels {
             .map(|base| base.join("excalibur").join("tunnels.yaml"))
     }
 
+    fn legacy_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|base| base.join("excalibur").join("tunnels.yaml"))
+    }
+
     /// A missing file is an empty set of profiles, not an error.
     pub fn load() -> Result<Self> {
         let Some(path) = Tunnels::path() else {
             return Ok(Tunnels::default());
         };
         if !path.exists() {
-            return Ok(Tunnels::default());
+            if let Some(legacy) = Self::legacy_path()
+                && legacy != path
+                && legacy.is_file()
+            {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&legacy, &path)?;
+            } else {
+                return Ok(Tunnels::default());
+            }
         }
         Ok(serde_yaml::from_str(&std::fs::read_to_string(&path)?)?)
     }

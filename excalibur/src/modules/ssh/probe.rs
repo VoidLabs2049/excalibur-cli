@@ -1,5 +1,5 @@
 use super::tunnels::{Forward, Kind};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -45,6 +45,7 @@ pub struct Health {
     /// whether the thing being exposed is up on this machine.
     pub path: Light,
     pub detail: String,
+    pub http_status: Option<u16>,
 }
 
 impl Health {
@@ -55,6 +56,7 @@ impl Health {
             port: Light::Unknown,
             path: Light::Unknown,
             detail: String::new(),
+            http_status: None,
         }
     }
 
@@ -64,6 +66,7 @@ impl Health {
             port: Light::Off,
             path: Light::Off,
             detail: String::new(),
+            http_status: None,
         }
     }
 
@@ -92,6 +95,7 @@ fn check_local(forward: &Forward) -> Health {
             port: Light::Unknown,
             path: Light::Unknown,
             detail: format!("cannot read a port out of `{}`", forward.bind),
+            http_status: None,
         };
     };
 
@@ -104,18 +108,22 @@ fn check_local(forward: &Forward) -> Health {
             // The failure ExitOnForwardFailure is meant to prevent, seen from
             // the other side: process up, nothing listening.
             detail: format!("running but nothing is listening on {port}"),
+            http_status: None,
         };
     }
 
-    let (path, detail) = match reachable(&format!("127.0.0.1:{port}")) {
-        Reach::Open => (Light::Ok, String::new()),
+    let result = reachable(&format!("127.0.0.1:{port}"));
+    let (path, detail, http_status) = match result.reach {
+        Reach::Open => (Light::Ok, String::new(), result.http_status),
         Reach::Closed => (
             Light::Bad,
             format!("tunnel is up but {} refused it", forward.target),
+            None,
         ),
         Reach::Refused => (
             Light::Bad,
             format!("nothing accepted a connection on {port}"),
+            None,
         ),
     };
     Health {
@@ -123,13 +131,14 @@ fn check_local(forward: &Forward) -> Health {
         port: bound.map(|_| Light::Ok).unwrap_or(Light::Unknown),
         path,
         detail,
+        http_status,
     }
 }
 
 fn check_remote(forward: &Forward) -> Health {
     // The listening port is on the far side. What is checkable here is the exit:
     // whether the service being exposed is actually up.
-    let (path, detail) = match reachable(&forward.target) {
+    let (path, detail) = match reachable(&forward.target).reach {
         Reach::Open => (
             Light::Ok,
             "remote bind is not visible from here; needs GatewayPorts to reach it \
@@ -146,6 +155,7 @@ fn check_remote(forward: &Forward) -> Health {
         port: Light::Unknown,
         path,
         detail,
+        http_status: None,
     }
 }
 
@@ -159,28 +169,71 @@ enum Reach {
     Refused,
 }
 
-fn reachable(address: &str) -> Reach {
+struct ReachResult {
+    reach: Reach,
+    http_status: Option<u16>,
+}
+
+fn refused() -> ReachResult {
+    ReachResult {
+        reach: Reach::Refused,
+        http_status: None,
+    }
+}
+
+fn reachable(address: &str) -> ReachResult {
     let Ok(mut addresses) = address.to_socket_addrs() else {
-        return Reach::Refused;
+        return refused();
     };
     let Some(addr) = addresses.next() else {
-        return Reach::Refused;
+        return refused();
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) else {
-        return Reach::Refused;
+        return refused();
     };
 
     // ssh accepts locally first and only then opens the channel to the far side,
     // so a forward whose target is down looks like an immediate EOF. A read that
     // times out, or that returns a banner, both mean the far side answered.
     if stream.set_read_timeout(Some(SETTLE_TIMEOUT)).is_err() {
-        return Reach::Open;
+        return ReachResult {
+            reach: Reach::Open,
+            http_status: None,
+        };
     }
-    let mut byte = [0u8; 1];
-    match stream.read(&mut byte) {
+    let _ = stream.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let mut response = [0u8; 16];
+    let reach = match stream.read(&mut response) {
         Ok(0) => Reach::Closed,
-        _ => Reach::Open,
+        Ok(_) => Reach::Open,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Reach::Open
+        }
+        Err(_) => Reach::Closed,
+    };
+    ReachResult {
+        reach,
+        http_status: parse_http_status(&response),
     }
+}
+
+fn parse_http_status(response: &[u8]) -> Option<u16> {
+    let line = std::str::from_utf8(
+        response
+            .split(|byte| *byte == b'\r' || *byte == b'\n')
+            .next()?,
+    )
+    .ok()?;
+    let mut fields = line.split_whitespace();
+    if !matches!(fields.next()?, "HTTP/1.0" | "HTTP/1.1") {
+        return None;
+    }
+    fields.next()?.parse().ok()
 }
 
 /// The port out of a bind spec: `29001` or `0.0.0.0:29001`.
@@ -353,7 +406,7 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
 
     #[test]
     fn a_port_nobody_serves_is_not_reachable() {
-        assert!(matches!(reachable("127.0.0.1:0"), Reach::Refused));
+        assert!(matches!(reachable("127.0.0.1:0").reach, Reach::Refused));
     }
 
     #[test]
@@ -361,12 +414,14 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
-            let accepted = listener.accept();
-            std::thread::sleep(Duration::from_millis(600));
-            drop(accepted);
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 128];
+                let _ = stream.read(&mut request);
+                std::thread::sleep(Duration::from_millis(600));
+            }
         });
         assert!(matches!(
-            reachable(&format!("127.0.0.1:{port}")),
+            reachable(&format!("127.0.0.1:{port}")).reach,
             Reach::Open
         ));
         handle.join().unwrap();
@@ -384,10 +439,35 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
             }
         });
         assert!(matches!(
-            reachable(&format!("127.0.0.1:{port}")),
+            reachable(&format!("127.0.0.1:{port}")).reach,
             Reach::Closed
         ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn an_http_listener_gets_a_local_browser_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 128];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        });
+        let forward = Forward {
+            host: "kami".into(),
+            kind: Kind::Local,
+            bind: port.to_string(),
+            target: "192.168.110.50:3000".into(),
+            note: String::new(),
+        };
+        let health = check(&forward);
+        handle.join().unwrap();
+        assert_eq!(health.path, Light::Ok);
+        assert_eq!(health.http_status, Some(200));
     }
 
     #[test]

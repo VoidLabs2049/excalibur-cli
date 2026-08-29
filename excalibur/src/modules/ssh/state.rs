@@ -1056,6 +1056,51 @@ impl SshState {
         }
     }
 
+    /// Open the selected local HTTP forward in the default browser.
+    pub fn open_selected_http(&mut self) {
+        let Some(slot) = self.selected_slot() else {
+            self.notify("No forward selected");
+            return;
+        };
+        let Some(port) = self
+            .health_at(slot)
+            .http_status
+            .and_then(|_| self.tunnels.get(slot.0, slot.1))
+            .and_then(|forward| super::tunnels::port_of(&forward.bind))
+        else {
+            self.notify("Selected forward is not identified as HTTP");
+            return;
+        };
+        let url = format!("http://127.0.0.1:{port}");
+        match std::process::Command::new("open").arg(&url).status() {
+            Ok(status) if status.success() => self.notify(format!("Opened {url}")),
+            Ok(status) => self.notify(format!("Browser failed to open {url}: {status}")),
+            Err(error) => self.notify(format!("Could not open {url}: {error}")),
+        }
+    }
+
+    /// Copy the selected local HTTP forward's URL to the system clipboard.
+    pub fn copy_selected_http(&mut self) {
+        let Some(slot) = self.selected_slot() else {
+            self.notify("No forward selected");
+            return;
+        };
+        let Some(port) = self
+            .health_at(slot)
+            .http_status
+            .and_then(|_| self.tunnels.get(slot.0, slot.1))
+            .and_then(|forward| super::tunnels::port_of(&forward.bind))
+        else {
+            self.notify("Selected forward is not identified as HTTP");
+            return;
+        };
+        let url = format!("http://127.0.0.1:{port}");
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&url)) {
+            Ok(()) => self.notify(format!("Copied {url}")),
+            Err(error) => self.notify(format!("Could not copy {url}: {error}")),
+        }
+    }
+
     /// Tunnel processes that no rule accounts for.
     ///
     /// Editing a rule while it runs strands its process: `find()` matches on

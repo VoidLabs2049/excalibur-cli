@@ -1212,7 +1212,7 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
     // know which layer each one is.
     // A rule that cannot be built never gets a process, so its lights stay dark
     // and the reason has to come from the rule itself.
-    let detail = match state.selected_orphan() {
+    let mut detail = match state.selected_orphan() {
         // The whole point of the row: it holds a port and no rule says so.
         Some(_) => "no rule describes this -- a rule edited while running leaves \
                     its process here"
@@ -1229,10 +1229,25 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
             })
             .unwrap_or_default(),
     };
+    if let Some((port, status)) = state.selected_slot().and_then(|slot| {
+        let status = state.health_at(slot).http_status?;
+        let port = state
+            .tunnels
+            .get(slot.0, slot.1)
+            .and_then(|forward| super::tunnels::port_of(&forward.bind))?;
+        Some((port, status))
+    }) {
+        if !detail.is_empty() {
+            detail.push_str("   ");
+        }
+        detail.push_str(&format!(
+            "HTTP {status}: http://127.0.0.1:{port}   [o] open [y] copy"
+        ));
+    }
     let (up, stopped, incomplete) = state.tallies();
     let legend = vec![
         Line::from(Span::styled(
-            "  process / listening / path        * up   x failed   - not observable   o stopped",
+            "  process / listening / path        * up   x failed   - not observable   o stopped   o: open HTTP",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(vec![

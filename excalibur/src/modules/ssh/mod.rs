@@ -362,6 +362,8 @@ impl SshModule {
             KeyCode::Char('a') => self.state.start_all(),
             KeyCode::Char('A') => self.state.stop_all(),
             KeyCode::Char('r') => self.state.refresh_tunnels(),
+            KeyCode::Char('o') => self.state.open_selected_http(),
+            KeyCode::Char('y') => self.state.copy_selected_http(),
             _ => {}
         }
         Ok(ModuleAction::None)

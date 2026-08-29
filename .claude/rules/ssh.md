@@ -46,6 +46,8 @@ CLI: `cargo run -- ssh`, alias `t`.
 `Forward` (tunnel profiles + form) / `Dashboard` (live tunnels).
 `Discover` (a host's listening ports) hangs off `Config` via `d`, not off the menu.
 The cursor starts on `Dashboard`, not the top entry — it is the high-frequency path.
+On a live local forward, an HTTP response and status code add a browser URL to the
+detail line; press `o` to open it or `y` to copy it on macOS.
 
 ## The three lights
 
@@ -92,7 +94,9 @@ is platform-independent.
   macOS keeps is the one that survives a narrow terminal.
 - **`Tunnels::path()` is `$XDG_CONFIG_HOME`-or-`~/.config`, not
   `dirs::config_dir()`.** The latter is `~/Library/Application Support` on
-  macOS, which would put the rules somewhere other than every doc says.
+  macOS, which would put the rules somewhere other than every doc says. If the
+  new path is absent, `load()` copies the old macOS file there without deleting
+  the original.
 
 ## Gotchas
 
