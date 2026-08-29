@@ -1,13 +1,16 @@
 use super::effective::Effective;
-use super::form::{Change, Editing, Field, HostForm};
+use super::form::{Change, Editing, Field, ForwardField, ForwardForm, HostForm};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Screen, SshState};
+use super::tunnels::Forward;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, List, ListItem, Paragraph, Widget, Wrap},
+    widgets::{
+        Block, BorderType, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
+    },
 };
 
 /// How many host rows the menu preview shows before eliding.
@@ -33,7 +36,7 @@ pub fn render(state: &SshState, area: Rect, buf: &mut Buffer) {
     match state.screen {
         Screen::Menu => render_menu(state, chunks[1], buf),
         Screen::Config => render_config(state, chunks[1], buf),
-        Screen::Forward => render_placeholder("tunnel profiles", chunks[1], buf),
+        Screen::Forward => render_forward(state, chunks[1], buf),
         Screen::Dashboard => render_placeholder("dashboard", chunks[1], buf),
     }
 
@@ -85,6 +88,20 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
                 " j/k: navigate   Enter: edit   g: ssh -G   /: search   Esc: back   q: quit{filter}"
             )
         }
+        Screen::Forward
+            if matches!(
+                state.forward_form.as_ref().map(|f| &f.editing),
+                Some(Some(Editing::Text(_)))
+            ) =>
+        {
+            " Enter: accept   Ctrl+U: clear   Esc: cancel".to_string()
+        }
+        Screen::Forward if state.forward_form.is_some() => {
+            " j/k: field   Enter: edit   Ctrl+S: save   Esc: close".to_string()
+        }
+        Screen::Forward => {
+            " j/k: navigate   Enter: edit   n: new   d: delete   Esc: back   q: quit".to_string()
+        }
         _ => " Esc: back to SSH menu   q: back to main menu".to_string(),
     };
     Paragraph::new(help)
@@ -130,17 +147,20 @@ fn render_menu(state: &SshState, area: Rect, buf: &mut Buffer) {
         })
         .collect();
 
-    List::new(items)
-        .block(
+    Widget::render(
+        List::new(items).block(
             Block::bordered()
                 .title(" Menu ")
                 .border_type(BorderType::Rounded),
-        )
-        .render(panes[0], buf);
+        ),
+        panes[0],
+        buf,
+    );
 
     let entry = state.menu_entry();
     let body = match entry.screen {
         Screen::Config => config_summary(state),
+        Screen::Forward => forward_summary(state),
         _ => vec![Line::from(Span::styled(
             "  not implemented yet",
             Style::default().fg(Color::DarkGray),
@@ -197,6 +217,46 @@ fn config_summary(state: &SshState) -> Vec<Line<'static>> {
             format!("  ... {} more", hosts.len() - MENU_PREVIEW_ROWS),
             Style::default().fg(Color::DarkGray),
         )));
+    }
+    lines
+}
+
+fn forward_summary(state: &SshState) -> Vec<Line<'static>> {
+    if let Some(error) = &state.tunnels_error {
+        return vec![Line::from(Span::styled(
+            format!("  {error}"),
+            Style::default().fg(Color::Red),
+        ))];
+    }
+    if state.tunnels.profiles.is_empty() {
+        return vec![Line::from(Span::styled(
+            "  no profiles yet",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "  {} profiles   {} forwards",
+                state.tunnels.profiles.len(),
+                state.tunnels.count()
+            ),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(""),
+    ];
+    for profile in &state.tunnels.profiles {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", profile.name),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for forward in &profile.forwards {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", forward.summary()),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
     lines
 }
@@ -374,35 +434,42 @@ fn render_fields(form: &HostForm, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Rendered stateful so the list scrolls to the highlighted row. With a plain
+/// `List` the selection silently disappears once the options outrun the pane --
+/// 35 host aliases into three visible rows.
 fn render_candidates(options: &[String], index: usize, area: Rect, buf: &mut Buffer) {
     let items: Vec<ListItem> = options
         .iter()
-        .enumerate()
-        .map(|(i, option)| {
+        .map(|option| {
             let text = if option.is_empty() {
-                "(none)".to_string()
+                "(none)"
             } else {
-                option.clone()
+                option.as_str()
             };
-            let style = if i == index {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(format!("  {text}"))).style(style)
+            ListItem::new(Line::from(format!("  {text}")))
         })
         .collect();
 
-    List::new(items)
+    let list = List::new(items)
         .block(
             Block::bordered()
-                .title(" j/k choose · Enter accept · i type · Esc cancel ")
+                .title(format!(
+                    " {}/{}  j/k choose · Enter accept · i type · Esc cancel ",
+                    index + 1,
+                    options.len()
+                ))
                 .border_type(BorderType::Rounded),
         )
-        .render(area, buf);
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(index));
+    StatefulWidget::render(list, area, buf, &mut list_state);
 }
 
 fn render_form_footer(state: &SshState, form: &HostForm, area: Rect, buf: &mut Buffer) {
@@ -518,7 +585,7 @@ fn render_host_list(state: &SshState, area: Rect, buf: &mut Buffer) {
         })
         .collect();
 
-    List::new(items).block(block).render(area, buf);
+    Widget::render(List::new(items).block(block), area, buf);
 }
 
 fn render_host_preview(state: &SshState, area: Rect, buf: &mut Buffer) {
@@ -595,6 +662,238 @@ fn truncate(text: &str, width: usize) -> String {
         .collect::<String>()
         + "…"
 }
+
+fn render_forward(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let panes = split_panes(area);
+    render_forward_list(state, panes[0], buf);
+    match &state.forward_form {
+        Some(form) => render_forward_form(form, panes[1], buf),
+        None => render_forward_detail(state, panes[1], buf),
+    }
+}
+
+fn render_forward_form(form: &ForwardForm, area: Rect, buf: &mut Buffer) {
+    let block = Block::bordered()
+        .title(if form.index.is_some() {
+            " Edit forward "
+        } else {
+            " New forward "
+        })
+        .border_type(BorderType::Rounded)
+        .style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(ForwardField::ALL.len() as u16),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); ForwardField::ALL.len()])
+        .split(chunks[0]);
+
+    for (i, field) in ForwardField::ALL.iter().enumerate() {
+        let selected = i == form.cursor;
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(14), Constraint::Min(0)])
+            .split(rows[i]);
+
+        let label_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Paragraph::new(format!(
+            "{} {}",
+            if selected { ">" } else { " " },
+            field.label()
+        ))
+        .style(label_style)
+        .render(columns[0], buf);
+
+        if selected && let Some(Editing::Text(textarea)) = &form.editing {
+            Widget::render(&**textarea, columns[1], buf);
+            continue;
+        }
+        let value = &form.values[i];
+        let (text, style) = if value.is_empty() {
+            ("(empty)".to_string(), Style::default().fg(Color::DarkGray))
+        } else {
+            (value.clone(), Style::default())
+        };
+        Paragraph::new(text).style(style).render(columns[1], buf);
+    }
+
+    match &form.editing {
+        Some(Editing::Pick { options, index }) => {
+            render_candidates(options, *index, chunks[2], buf)
+        }
+        // The diagram is live: flipping the direction swaps which side listens,
+        // which is the field people get wrong.
+        _ => Paragraph::new(forward_explainer(&form.to_forward()))
+            .wrap(Wrap { trim: false })
+            .render(chunks[2], buf),
+    }
+}
+
+/// Direction diagram plus the command it becomes.
+fn forward_explainer(forward: &Forward) -> Vec<Line<'static>> {
+    let (listen, exit) = forward.explain();
+    vec![
+        Line::from(Span::styled(
+            format!("  {listen}"),
+            Style::default().fg(Color::Green),
+        )),
+        Line::from(Span::styled(
+            format!("  {exit}"),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", forward.command_line()),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
+}
+
+fn render_forward_list(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let block = Block::bordered()
+        .title(format!(" Forwards ({}) ", state.tunnels.count()))
+        .border_type(BorderType::Rounded);
+
+    if let Some(error) = &state.tunnels_error {
+        Paragraph::new(format!("  {error}"))
+            .block(block)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        return;
+    }
+
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut row = 0;
+    for profile in &state.tunnels.profiles {
+        items.push(
+            ListItem::new(Line::from(format!(" {}", profile.name)))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        );
+        for forward in &profile.forwards {
+            let selected = row == state.forward_index;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            items.push(ListItem::new(Line::from(format!("   {}", forward.summary()))).style(style));
+            row += 1;
+        }
+    }
+
+    if items.is_empty() {
+        let path = super::tunnels::Tunnels::path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/excalibur/tunnels.yaml".to_string());
+        Paragraph::new(format!(
+            "  no profiles yet\n\n  will be read from\n  {path}"
+        ))
+        .block(block)
+        .style(Style::default().fg(Color::DarkGray))
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
+        return;
+    }
+
+    Widget::render(List::new(items).block(block), area, buf);
+}
+
+fn render_forward_detail(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let block = Block::bordered()
+        .title(" Detail ")
+        .border_type(BorderType::Rounded);
+
+    let Some(forward) = state.selected_forward() else {
+        Paragraph::new(EMPTY_FORWARD_HELP)
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        return;
+    };
+
+    let (listen, exit) = forward.explain();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  direction   "),
+            Span::styled(
+                format!("{}  ({})", forward.kind.label(), forward.kind.flag()),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {listen}"),
+            Style::default().fg(Color::Green),
+        )),
+        Line::from(Span::styled(
+            format!("  {exit}"),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+    ];
+
+    if !forward.note.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", forward.note),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    if !state.config.hosts.iter().any(|h| h.alias() == forward.host) {
+        lines.push(Line::from(Span::styled(
+            format!("  `{}` is not a host in ~/.ssh/config", forward.host),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  {}", forward.command_line()),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
+}
+
+const EMPTY_FORWARD_HELP: &str = "\
+  A forward describes one tunnel.
+
+    profiles:
+      - name: daily
+        forwards:
+          - host: xx-database-1
+            kind: local          # local (-L) or remote (-R)
+            bind: 29001
+            target: 0.0.0.0:9001
+            note: minio console
+
+  local  opens the port here and exits on the far side
+  remote opens the port on the far side and exits here";
 
 fn render_placeholder(name: &str, area: Rect, buf: &mut Buffer) {
     Paragraph::new(format!("\n  {name} — not implemented yet"))

@@ -1,6 +1,7 @@
 use super::effective::{self, Effective};
-use super::form::{Field, HostForm, write_config};
+use super::form::{Field, ForwardForm, HostForm, write_config};
 use super::sshconfig::{HostBlock, SshConfig};
+use super::tunnels::{Forward, Kind, Profile, Tunnels};
 use std::time::{Duration, Instant};
 
 /// How long a save / error message stays on screen.
@@ -69,6 +70,13 @@ pub struct SshState {
     /// `ssh -G` output for an alias, shown instead of the raw block preview.
     pub effective: Option<(String, Effective)>,
     pub notification: Option<(String, Instant)>,
+
+    pub tunnels: Tunnels,
+    /// Why the last tunnels load failed -- usually a hand-edited yaml.
+    pub tunnels_error: Option<String>,
+    /// Index into `tunnels.all()`, so it walks profiles transparently.
+    pub forward_index: usize,
+    pub forward_form: Option<ForwardForm>,
 }
 
 impl SshState {
@@ -85,6 +93,10 @@ impl SshState {
             form: None,
             effective: None,
             notification: None,
+            tunnels: Tunnels::default(),
+            tunnels_error: None,
+            forward_index: 0,
+            forward_form: None,
         }
     }
 
@@ -103,6 +115,128 @@ impl SshState {
             }
         }
         self.apply_filters();
+    }
+
+    pub fn load_tunnels(&mut self) {
+        match Tunnels::load() {
+            Ok(tunnels) => {
+                self.tunnels = tunnels;
+                self.tunnels_error = None;
+            }
+            Err(e) => {
+                self.tunnels = Tunnels::default();
+                self.tunnels_error = Some(e.to_string());
+            }
+        }
+        self.forward_index = 0;
+    }
+
+    pub fn forward_next(&mut self) {
+        let count = self.tunnels.count();
+        if count > 0 {
+            self.forward_index = (self.forward_index + 1) % count;
+        }
+    }
+
+    pub fn forward_previous(&mut self) {
+        let count = self.tunnels.count();
+        if count > 0 {
+            self.forward_index = (self.forward_index + count - 1) % count;
+        }
+    }
+
+    pub fn selected_forward(&self) -> Option<&Forward> {
+        let (profile, forward) = *self.tunnels.all().get(self.forward_index)?;
+        self.tunnels.get(profile, forward)
+    }
+
+    /// Open the editor on the selected rule, or on a blank one in its profile.
+    pub fn open_forward_form(&mut self, blank: bool) {
+        if blank {
+            if self.tunnels.profiles.is_empty() {
+                self.tunnels.profiles.push(Profile {
+                    name: "default".to_string(),
+                    forwards: Vec::new(),
+                });
+            }
+            let profile = self
+                .tunnels
+                .all()
+                .get(self.forward_index)
+                .map(|(p, _)| *p)
+                .unwrap_or(0);
+            self.forward_form = Some(ForwardForm::new(
+                profile,
+                None,
+                &Forward {
+                    host: String::new(),
+                    kind: Kind::Local,
+                    bind: String::new(),
+                    target: String::new(),
+                    note: String::new(),
+                },
+            ));
+            return;
+        }
+        let Some(&(profile, index)) = self.tunnels.all().get(self.forward_index) else {
+            return;
+        };
+        let Some(forward) = self.tunnels.get(profile, index) else {
+            return;
+        };
+        self.forward_form = Some(ForwardForm::new(profile, Some(index), forward));
+    }
+
+    pub fn forward_form_begin_edit(&mut self) {
+        let config = &self.config;
+        if let Some(form) = self.forward_form.as_mut() {
+            form.begin_edit(config);
+        }
+    }
+
+    /// Fold the open rule back into the profile and write the whole file.
+    pub fn save_forward_form(&mut self) {
+        let Some(form) = &self.forward_form else {
+            return;
+        };
+        let forward = form.to_forward();
+        if forward.host.is_empty() || forward.bind.is_empty() || forward.target.is_empty() {
+            self.notify("Host, listen and exit are all required");
+            return;
+        }
+        let (profile, index) = (form.profile, form.index);
+        let Some(target) = self.tunnels.profiles.get_mut(profile) else {
+            return;
+        };
+        match index {
+            Some(i) if i < target.forwards.len() => target.forwards[i] = forward,
+            _ => target.forwards.push(forward),
+        }
+        match self.tunnels.save() {
+            Ok(path) => {
+                self.forward_form = None;
+                self.notify(format!("Saved {}", path.display()));
+            }
+            Err(e) => self.notify(format!("Save failed: {e}")),
+        }
+    }
+
+    pub fn delete_forward(&mut self) {
+        let Some(&(profile, index)) = self.tunnels.all().get(self.forward_index) else {
+            return;
+        };
+        if let Some(target) = self.tunnels.profiles.get_mut(profile) {
+            target.forwards.remove(index);
+        }
+        // Dropping the last rule of a profile leaves an empty heading behind.
+        self.tunnels.profiles.retain(|p| !p.forwards.is_empty());
+        self.forward_index = self
+            .forward_index
+            .min(self.tunnels.count().saturating_sub(1));
+        match self.tunnels.save() {
+            Ok(_) => self.notify("Deleted"),
+            Err(e) => self.notify(format!("Save failed: {e}")),
+        }
     }
 
     pub fn apply_filters(&mut self) {

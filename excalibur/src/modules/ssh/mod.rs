@@ -2,6 +2,7 @@ mod effective;
 mod form;
 mod sshconfig;
 mod state;
+mod tunnels;
 mod ui;
 
 use super::{Module, ModuleAction, ModuleId, ModuleMetadata};
@@ -14,6 +15,15 @@ use ratatui::{
     layout::Rect,
 };
 use state::{Screen, SshState};
+
+/// Decide first, act second: the picker's own state is borrowed while it is
+/// being read, so commit/cancel cannot run inside the match that reads it.
+enum Then {
+    Nothing,
+    Commit,
+    Cancel,
+    AsText,
+}
 
 #[derive(Debug)]
 pub struct SshModule {
@@ -137,15 +147,6 @@ impl SshModule {
     }
 
     fn handle_field_edit_key(&mut self, key: KeyEvent) {
-        // Decide first, act second: the picker's own state is borrowed while it
-        // is being read, so commit/cancel cannot run inside the match.
-        enum Then {
-            Nothing,
-            Commit,
-            Cancel,
-            AsText,
-        }
-
         let Some(form) = &mut self.state.form else {
             return;
         };
@@ -175,6 +176,91 @@ impl SshModule {
             None => Then::Nothing,
         };
 
+        match then {
+            Then::Nothing => {}
+            Then::Commit => form.commit_edit(),
+            Then::Cancel => form.cancel_edit(),
+            Then::AsText => form.edit_as_text(),
+        }
+    }
+
+    fn handle_forward_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+        if self.state.forward_form.is_some() {
+            return self.handle_forward_form_key(key);
+        }
+        match key.code {
+            KeyCode::Esc => self.state.screen = Screen::Menu,
+            KeyCode::Char('q') => return Ok(ModuleAction::Exit),
+            KeyCode::Up | KeyCode::Char('k') => self.state.forward_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
+            KeyCode::Enter => self.state.open_forward_form(false),
+            KeyCode::Char('n') => self.state.open_forward_form(true),
+            KeyCode::Char('d') => self.state.delete_forward(),
+            _ => {}
+        }
+        Ok(ModuleAction::None)
+    }
+
+    fn handle_forward_form_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+        if self
+            .state
+            .forward_form
+            .as_ref()
+            .is_some_and(|form| form.editing.is_some())
+        {
+            self.handle_forward_field_key(key);
+            return Ok(ModuleAction::None);
+        }
+        match key.code {
+            KeyCode::Esc => self.state.forward_form = None,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.save_forward_form()
+            }
+            KeyCode::Enter => self.state.forward_form_begin_edit(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(form) = &mut self.state.forward_form {
+                    form.previous_field();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(form) = &mut self.state.forward_form {
+                    form.next_field();
+                }
+            }
+            _ => {}
+        }
+        Ok(ModuleAction::None)
+    }
+
+    fn handle_forward_field_key(&mut self, key: KeyEvent) {
+        let Some(form) = &mut self.state.forward_form else {
+            return;
+        };
+        let then = match &mut form.editing {
+            Some(Editing::Pick { options, index }) => match key.code {
+                KeyCode::Esc => Then::Cancel,
+                KeyCode::Enter => Then::Commit,
+                KeyCode::Tab | KeyCode::Char('i') => Then::AsText,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *index = index.saturating_sub(1);
+                    Then::Nothing
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *index = (*index + 1).min(options.len().saturating_sub(1));
+                    Then::Nothing
+                }
+                _ => Then::Nothing,
+            },
+            Some(Editing::Text(textarea)) => match key.code {
+                KeyCode::Esc => Then::Cancel,
+                KeyCode::Enter => Then::Commit,
+                _ => {
+                    textarea.input(key);
+                    Then::Nothing
+                }
+            },
+            None => Then::Nothing,
+        };
         match then {
             Then::Nothing => {}
             Then::Commit => form.commit_edit(),
@@ -214,6 +300,7 @@ impl Module for SshModule {
     fn init(&mut self) -> Result<()> {
         self.state = SshState::new();
         self.state.load_config();
+        self.state.load_tunnels();
         Ok(())
     }
 
@@ -221,6 +308,7 @@ impl Module for SshModule {
         match self.state.screen {
             Screen::Menu => self.handle_menu_key(key_event),
             Screen::Config => self.handle_config_key(key_event),
+            Screen::Forward => self.handle_forward_key(key_event),
             _ => self.handle_subscreen_key(key_event),
         }
     }
@@ -429,6 +517,29 @@ mod tests {
         assert!(module.state.effective.is_some());
         press(&mut module, KeyCode::Char('j'));
         assert!(module.state.effective.is_none());
+    }
+
+    #[test]
+    fn a_long_candidate_list_scrolls_to_the_selection() {
+        // With a plain List the highlight silently falls off the bottom once the
+        // options outrun the pane, and 35 aliases always will.
+        let config: String = (0..30)
+            .map(|i| format!("Host host{i:02}\n  Port 22\n"))
+            .collect();
+        let mut module = on_config_screen(&config);
+        press(&mut module, KeyCode::Enter);
+        for _ in 0..4 {
+            press(&mut module, KeyCode::Char('j')); // to the jump-host field
+        }
+        press(&mut module, KeyCode::Enter); // open the picker
+        for _ in 0..28 {
+            press(&mut module, KeyCode::Char('j'));
+        }
+        let out = rendered(&module);
+        assert!(
+            out.contains("host27"),
+            "the selected candidate scrolled out of view"
+        );
     }
 
     #[test]

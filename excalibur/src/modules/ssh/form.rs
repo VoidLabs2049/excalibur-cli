@@ -1,4 +1,5 @@
 use super::sshconfig::{SshConfig, proxy_command_gateway_span};
+use super::tunnels::{Forward, Kind};
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use std::path::{Path, PathBuf};
@@ -694,5 +695,140 @@ mod tests {
     fn user_candidates_come_from_the_config() {
         let config = config("Host a\n  User root\nHost b\n  User lxb\nHost c\n  User lxb\n");
         assert_eq!(candidates(&config, Field::User, 0), ["lxb", "root"]);
+    }
+}
+
+/// The five fields of a tunnel rule. Unlike [`HostForm`] this edits a struct we
+/// own, so there is no file formatting to preserve -- the whole yaml is rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardField {
+    Host,
+    Kind,
+    Bind,
+    Target,
+    Note,
+}
+
+impl ForwardField {
+    pub const ALL: [ForwardField; 5] = [
+        ForwardField::Host,
+        ForwardField::Kind,
+        ForwardField::Bind,
+        ForwardField::Target,
+        ForwardField::Note,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ForwardField::Host => "Host",
+            ForwardField::Kind => "Direction",
+            ForwardField::Bind => "Listen on",
+            ForwardField::Target => "Exit at",
+            ForwardField::Note => "Note",
+        }
+    }
+
+    fn is_pick(self) -> bool {
+        matches!(self, ForwardField::Host | ForwardField::Kind)
+    }
+}
+
+#[derive(Debug)]
+pub struct ForwardForm {
+    pub profile: usize,
+    /// Index within the profile, or `None` while the rule is still new.
+    pub index: Option<usize>,
+    pub values: Vec<String>,
+    pub cursor: usize,
+    pub editing: Option<Editing>,
+}
+
+impl ForwardForm {
+    pub fn new(profile: usize, index: Option<usize>, forward: &Forward) -> Self {
+        ForwardForm {
+            profile,
+            index,
+            values: vec![
+                forward.host.clone(),
+                forward.kind.label().to_string(),
+                forward.bind.clone(),
+                forward.target.clone(),
+                forward.note.clone(),
+            ],
+            cursor: 0,
+            editing: None,
+        }
+    }
+
+    pub fn field(&self) -> ForwardField {
+        ForwardField::ALL[self.cursor]
+    }
+
+    pub fn next_field(&mut self) {
+        self.cursor = (self.cursor + 1) % ForwardField::ALL.len();
+    }
+
+    pub fn previous_field(&mut self) {
+        self.cursor = (self.cursor + ForwardField::ALL.len() - 1) % ForwardField::ALL.len();
+    }
+
+    /// The rule as it currently stands, so the direction diagram and the command
+    /// line update while the form is still open.
+    pub fn to_forward(&self) -> Forward {
+        Forward {
+            host: self.values[0].clone(),
+            kind: Kind::ALL
+                .into_iter()
+                .find(|k| k.label() == self.values[1])
+                .unwrap_or(Kind::Local),
+            bind: self.values[2].clone(),
+            target: self.values[3].clone(),
+            note: self.values[4].clone(),
+        }
+    }
+
+    pub fn begin_edit(&mut self, config: &SshConfig) {
+        let field = self.field();
+        self.editing = Some(if field.is_pick() {
+            let options: Vec<String> = match field {
+                ForwardField::Kind => Kind::ALL.iter().map(|k| k.label().to_string()).collect(),
+                _ => config
+                    .hosts
+                    .iter()
+                    .map(|h| h.alias().to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            };
+            let index = options
+                .iter()
+                .position(|o| *o == self.values[self.cursor])
+                .unwrap_or(0);
+            Editing::Pick { options, index }
+        } else {
+            Editing::Text(Box::new(text_area(&self.values[self.cursor])))
+        });
+    }
+
+    pub fn commit_edit(&mut self) {
+        let value = match self.editing.take() {
+            Some(Editing::Text(area)) => area.lines().first().cloned().unwrap_or_default(),
+            Some(Editing::Pick { options, index }) => {
+                options.get(index).cloned().unwrap_or_default()
+            }
+            None => return,
+        };
+        self.values[self.cursor] = value.trim().to_string();
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+    }
+
+    pub fn edit_as_text(&mut self) {
+        if let Some(Editing::Pick { options, index }) = &self.editing {
+            let seed = options.get(*index).cloned().unwrap_or_default();
+            self.editing = Some(Editing::Text(Box::new(text_area(&seed))));
+        }
     }
 }
