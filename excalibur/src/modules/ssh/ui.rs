@@ -97,11 +97,23 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
         {
             " Enter: accept   Ctrl+U: clear   Esc: cancel".to_string()
         }
+        // Naming a group that does not exist yet is the only way to create one,
+        // and it goes through Tab. The placeholder cannot say so -- the group
+        // field is never empty -- so the hint has to live here.
+        Screen::Forward
+            if matches!(
+                state.forward_form.as_ref().map(|f| &f.editing),
+                Some(Some(Editing::Pick { .. }))
+            ) =>
+        {
+            " j/k: choose   Enter: accept   Tab: type a new one   Esc: cancel".to_string()
+        }
         Screen::Forward if state.forward_form.is_some() => {
             " j/k: field   Enter: edit   Ctrl+S: save   Esc: close".to_string()
         }
         Screen::Forward => {
-            " j/k: navigate   Enter: edit   n: new   d: delete   Esc: back   q: quit".to_string()
+            " j/k: navigate   Enter: edit   n: new   c: clone   d: delete   Esc: back   q: quit"
+                .to_string()
         }
         Screen::Dashboard => {
             " j/k: navigate   Enter: start/stop   a: start all   A: stop all   r: refresh   Esc: back"

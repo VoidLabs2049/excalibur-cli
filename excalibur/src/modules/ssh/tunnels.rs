@@ -180,7 +180,8 @@ impl Forward {
     }
 }
 
-fn port_of(spec: &str) -> Option<u16> {
+/// The port at the end of a `port`, `address:port`, or `host:port` spec.
+pub fn port_of(spec: &str) -> Option<u16> {
     spec.rsplit(':').next()?.trim().parse().ok()
 }
 

@@ -198,6 +198,7 @@ impl SshModule {
             KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
             KeyCode::Enter => self.state.open_forward_form(false),
             KeyCode::Char('n') => self.state.open_forward_form(true),
+            KeyCode::Char('c') => self.state.clone_forward(),
             KeyCode::Char('d') => self.state.delete_forward(),
             _ => {}
         }
@@ -621,11 +622,17 @@ mod tests {
         with_tunnels(&mut module, vec![incomplete_rule()]);
         module.state.screen = Screen::Forward;
         press(&mut module, KeyCode::Enter);
-        module.state.forward_form.as_mut().unwrap().cursor = 3;
+        // Found by name rather than hardcoded, so adding a field ahead of the
+        // exit does not silently point this at a different one.
+        let exit = form::ForwardField::ALL
+            .iter()
+            .position(|f| *f == form::ForwardField::Target)
+            .unwrap();
+        module.state.forward_form.as_mut().unwrap().cursor = exit;
         press(&mut module, KeyCode::Enter); // open the text box
         press(&mut module, KeyCode::Enter); // accept unchanged
         assert_eq!(
-            module.state.forward_form.as_ref().unwrap().values[3],
+            module.state.forward_form.as_ref().unwrap().values[exit],
             "localhost:6022"
         );
     }
@@ -762,6 +769,157 @@ mod tests {
         assert!(
             rendered(&module).contains("39019"),
             "the selected rule scrolled out of view"
+        );
+    }
+
+    /// Move the form cursor onto a field by name.
+    fn focus(module: &mut SshModule, field: form::ForwardField) {
+        let at = form::ForwardField::ALL
+            .iter()
+            .position(|f| *f == field)
+            .unwrap();
+        module.state.forward_form.as_mut().unwrap().cursor = at;
+    }
+
+    fn group_of(module: &SshModule, profile: usize) -> &str {
+        &module.state.tunnels.profiles[profile].name
+    }
+
+    #[test]
+    fn the_group_is_a_field_offering_the_ones_that_exist() {
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001")]),
+                ("lab", vec![forward("39002")]),
+            ],
+        );
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Enter); // open the form on the first rule
+        focus(&mut module, form::ForwardField::Group);
+        press(&mut module, KeyCode::Enter); // open the picker
+        let out = rendered(&module);
+        assert!(out.contains("daily"), "the current group is not offered");
+        assert!(out.contains("lab"), "the other group is not offered");
+        // Tab is the only route to a group that does not exist yet, and the
+        // placeholder cannot advertise it -- the field is never empty.
+        assert!(
+            out.contains("Tab: type a new one"),
+            "no way to discover how to name a new group"
+        );
+    }
+
+    #[test]
+    fn typing_a_group_that_does_not_exist_creates_it_on_save() {
+        // This is the only way a group comes into being: there is no separate
+        // "new group" step, so a group with nothing in it cannot be produced.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Char('n')); // blank rule
+        focus(&mut module, form::ForwardField::Group);
+        press(&mut module, KeyCode::Enter); // picker
+        press(&mut module, KeyCode::Tab); // type over it instead
+        for c in "lab".chars() {
+            press(&mut module, KeyCode::Char(c));
+        }
+        press(&mut module, KeyCode::Enter); // commit the name
+
+        let form = module.state.forward_form.as_mut().unwrap();
+        form.values = vec![
+            "lab".into(),
+            "kami".into(),
+            "local".into(),
+            "39002".into(),
+            "localhost:22".into(),
+            String::new(),
+        ];
+        module.state.apply_forward_form().unwrap();
+
+        assert_eq!(module.state.tunnels.profiles.len(), 2, "no group was made");
+        assert_eq!(group_of(&module, 1), "lab");
+        assert_eq!(module.state.tunnels.profiles[1].forwards.len(), 1);
+    }
+
+    #[test]
+    fn changing_the_group_moves_the_rule_instead_of_copying_it() {
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001"), forward("39002")]),
+                ("lab", vec![forward("39003")]),
+            ],
+        );
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Enter); // form on daily's first rule
+        module.state.forward_form.as_mut().unwrap().values[0] = "lab".into();
+        module.state.apply_forward_form().unwrap();
+
+        assert_eq!(module.state.tunnels.count(), 3, "a rule was duplicated");
+        assert_eq!(module.state.tunnels.profiles[0].forwards.len(), 1);
+        assert_eq!(module.state.tunnels.profiles[1].forwards.len(), 2);
+    }
+
+    #[test]
+    fn emptying_a_group_by_moving_its_last_rule_out_removes_it() {
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001")]),
+                ("lab", vec![forward("39002")]),
+            ],
+        );
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Enter);
+        module.state.forward_form.as_mut().unwrap().values[0] = "lab".into();
+        module.state.apply_forward_form().unwrap();
+
+        assert_eq!(
+            module.state.tunnels.profiles.len(),
+            1,
+            "an empty group survived"
+        );
+        assert_eq!(group_of(&module, 0), "lab");
+    }
+
+    #[test]
+    fn cloning_a_rule_lands_on_the_next_port_nobody_has_claimed() {
+        // 39002 is taken, so the clone of 39001 has to skip to 39003 -- two
+        // rules on one port cannot both be up.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![noted("39001", "minio"), forward("39002")])],
+        );
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Char('c'));
+        let form = module.state.forward_form.as_ref().expect("a form opened");
+        assert_eq!(form.group(), "daily", "the clone left its group");
+        assert_eq!(form.to_forward().bind, "39003");
+        assert_eq!(form.to_forward().note, "minio", "the rest was not carried");
+        assert!(form.index.is_none(), "the clone would overwrite its source");
+    }
+
+    #[test]
+    fn cloning_keeps_the_bind_address_and_only_moves_the_port() {
+        let mut module = SshModule::new();
+        let mut rule = forward("39001");
+        rule.bind = "0.0.0.0:39001".into();
+        with_profiles(&mut module, vec![("daily", vec![rule])]);
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Char('c'));
+        assert_eq!(
+            module
+                .state
+                .forward_form
+                .as_ref()
+                .unwrap()
+                .to_forward()
+                .bind,
+            "0.0.0.0:39002"
         );
     }
 

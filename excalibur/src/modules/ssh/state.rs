@@ -170,21 +170,15 @@ impl SshState {
         self.tunnels.get(profile, forward)
     }
 
-    /// Open the editor on the selected rule, or on a blank one in its profile.
+    /// Open the editor on the selected rule, or on a blank one in its group.
+    ///
+    /// A blank rule with no group at all still opens: the group field defaults
+    /// to `default`, and the group itself only comes into existence when the
+    /// rule is saved.
     pub fn open_forward_form(&mut self, blank: bool) {
         if blank {
-            if self.tunnels.profiles.is_empty() {
-                self.tunnels.profiles.push(Profile {
-                    name: "default".to_string(),
-                    forwards: Vec::new(),
-                });
-            }
-            let profile = self
-                .tunnels
-                .all()
-                .get(self.forward_index)
-                .map(|(p, _)| *p)
-                .unwrap_or(0);
+            let profile = self.selected_profile().unwrap_or(0);
+            let group = self.group_name(profile);
             self.forward_form = Some(ForwardForm::new(
                 profile,
                 None,
@@ -195,6 +189,7 @@ impl SshState {
                     target: String::new(),
                     note: String::new(),
                 },
+                &group,
             ));
             return;
         }
@@ -204,33 +199,84 @@ impl SshState {
         let Some(forward) = self.tunnels.get(profile, index) else {
             return;
         };
-        self.forward_form = Some(ForwardForm::new(profile, Some(index), forward));
+        let group = self.group_name(profile);
+        self.forward_form = Some(ForwardForm::new(profile, Some(index), forward, &group));
+    }
+
+    /// Open the editor on a copy of the selected rule, on the next free port.
+    ///
+    /// A group of ports to one host differs only in the port, so cloning turns
+    /// "add another one" from filling six fields into changing one.
+    pub fn clone_forward(&mut self) {
+        let Some(&(profile, index)) = self.tunnels.all().get(self.forward_index) else {
+            return;
+        };
+        let Some(source) = self.tunnels.get(profile, index) else {
+            return;
+        };
+        let mut copy = source.clone();
+        copy.bind = self.next_free_bind(&source.bind);
+        let group = self.group_name(profile);
+        self.forward_form = Some(ForwardForm::new(profile, None, &copy, &group));
+    }
+
+    /// The next listening port no other rule already claims.
+    ///
+    /// Two rules cannot bind the same port, so a clone that reused it would be
+    /// refused the moment both are started.
+    fn next_free_bind(&self, bind: &str) -> String {
+        let (prefix, port) = match bind.rsplit_once(':') {
+            Some((address, port)) => (format!("{address}:"), port.trim().parse::<u16>().ok()),
+            None => (String::new(), bind.trim().parse::<u16>().ok()),
+        };
+        let Some(port) = port else {
+            return bind.to_string();
+        };
+        let taken: std::collections::HashSet<u16> = self
+            .tunnels
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.forwards)
+            .filter_map(|forward| super::tunnels::port_of(&forward.bind))
+            .collect();
+        let mut candidate = port;
+        loop {
+            let Some(next) = candidate.checked_add(1) else {
+                return bind.to_string();
+            };
+            candidate = next;
+            if !taken.contains(&candidate) {
+                return format!("{prefix}{candidate}");
+            }
+        }
+    }
+
+    fn group_name(&self, profile: usize) -> String {
+        self.tunnels
+            .profiles
+            .get(profile)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| "default".to_string())
     }
 
     pub fn forward_form_begin_edit(&mut self) {
         let config = &self.config;
+        let groups: Vec<String> = self
+            .tunnels
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
         if let Some(form) = self.forward_form.as_mut() {
-            form.begin_edit(config);
+            form.begin_edit(config, &groups);
         }
     }
 
-    /// Fold the open rule back into the profile and write the whole file.
+    /// Fold the open rule back into its group, then write the whole file.
     pub fn save_forward_form(&mut self) {
-        let Some(form) = &self.forward_form else {
-            return;
-        };
-        let forward = form.to_forward();
-        if let Some(problem) = forward.problem() {
+        if let Err(problem) = self.apply_forward_form() {
             self.notify(problem);
             return;
-        }
-        let (profile, index) = (form.profile, form.index);
-        let Some(target) = self.tunnels.profiles.get_mut(profile) else {
-            return;
-        };
-        match index {
-            Some(i) if i < target.forwards.len() => target.forwards[i] = forward,
-            _ => target.forwards.push(forward),
         }
         match self.tunnels.save() {
             Ok(path) => {
@@ -239,6 +285,73 @@ impl SshState {
             }
             Err(e) => self.notify(format!("Save failed: {e}")),
         }
+    }
+
+    /// Fold the open rule back into its group, in memory only.
+    ///
+    /// Separate from the write so the placement rules can be tested without a
+    /// test run overwriting the real `tunnels.yaml`.
+    ///
+    /// The group is a value on the form, so this may also move the rule to
+    /// another group or bring a new group into being. Groups are never created
+    /// on their own: one exists exactly as long as it holds a rule.
+    pub(super) fn apply_forward_form(&mut self) -> Result<(), String> {
+        let Some(form) = &self.forward_form else {
+            return Err("nothing to save".to_string());
+        };
+        let forward = form.to_forward();
+        if let Some(problem) = forward.problem() {
+            return Err(problem);
+        }
+        let group = form.group().to_string();
+        if group.is_empty() {
+            return Err("group is required".to_string());
+        }
+        let (origin, index) = (form.profile, form.index);
+
+        let stays = self
+            .tunnels
+            .profiles
+            .get(origin)
+            .is_some_and(|entry| entry.name == group);
+        match index {
+            Some(i) if stays && i < self.tunnels.profiles[origin].forwards.len() => {
+                self.tunnels.profiles[origin].forwards[i] = forward;
+            }
+            _ => {
+                // Take it out of where it was before looking up where it goes,
+                // so a move cannot leave a copy behind.
+                if let Some(i) = index
+                    && let Some(entry) = self.tunnels.profiles.get_mut(origin)
+                    && i < entry.forwards.len()
+                {
+                    entry.forwards.remove(i);
+                }
+                let target = match self
+                    .tunnels
+                    .profiles
+                    .iter()
+                    .position(|entry| entry.name == group)
+                {
+                    Some(found) => found,
+                    None => {
+                        self.tunnels.profiles.push(Profile {
+                            name: group,
+                            forwards: Vec::new(),
+                        });
+                        self.tunnels.profiles.len() - 1
+                    }
+                };
+                self.tunnels.profiles[target].forwards.push(forward);
+                self.tunnels
+                    .profiles
+                    .retain(|entry| !entry.forwards.is_empty());
+                self.forward_index = self
+                    .forward_index
+                    .min(self.tunnels.count().saturating_sub(1));
+            }
+        }
+        Ok(())
     }
 
     pub fn delete_forward(&mut self) {

@@ -698,10 +698,11 @@ mod tests {
     }
 }
 
-/// The five fields of a tunnel rule. Unlike [`HostForm`] this edits a struct we
+/// The six fields of a tunnel rule. Unlike [`HostForm`] this edits a struct we
 /// own, so there is no file formatting to preserve -- the whole yaml is rewritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardField {
+    Group,
     Host,
     Kind,
     Bind,
@@ -710,7 +711,8 @@ pub enum ForwardField {
 }
 
 impl ForwardField {
-    pub const ALL: [ForwardField; 5] = [
+    pub const ALL: [ForwardField; 6] = [
+        ForwardField::Group,
         ForwardField::Host,
         ForwardField::Kind,
         ForwardField::Bind,
@@ -720,6 +722,7 @@ impl ForwardField {
 
     pub fn label(self) -> &'static str {
         match self {
+            ForwardField::Group => "Group",
             ForwardField::Host => "Host",
             ForwardField::Kind => "Direction",
             ForwardField::Bind => "Listen on",
@@ -729,7 +732,10 @@ impl ForwardField {
     }
 
     fn is_pick(self) -> bool {
-        matches!(self, ForwardField::Host | ForwardField::Kind)
+        matches!(
+            self,
+            ForwardField::Group | ForwardField::Host | ForwardField::Kind
+        )
     }
 
     /// Shown in place of the value when a field is empty. `-L` takes
@@ -738,6 +744,7 @@ impl ForwardField {
     /// say whose view the host is resolved in, which is the far side for `-L`.
     pub fn placeholder(self) -> &'static str {
         match self {
+            ForwardField::Group => "(pick a group, or Tab to name a new one)",
             ForwardField::Host => "(pick a host)",
             ForwardField::Kind => "(local or remote)",
             ForwardField::Bind => "(port, or address:port)",
@@ -749,6 +756,9 @@ impl ForwardField {
 
 #[derive(Debug)]
 pub struct ForwardForm {
+    /// Where the rule was read from. The group it will be *written* to is
+    /// `values[0]`, which the user can change to move the rule or to name a
+    /// group that does not exist yet.
     pub profile: usize,
     /// Index within the profile, or `None` while the rule is still new.
     pub index: Option<usize>,
@@ -758,11 +768,12 @@ pub struct ForwardForm {
 }
 
 impl ForwardForm {
-    pub fn new(profile: usize, index: Option<usize>, forward: &Forward) -> Self {
+    pub fn new(profile: usize, index: Option<usize>, forward: &Forward, group: &str) -> Self {
         ForwardForm {
             profile,
             index,
             values: vec![
+                group.to_string(),
                 forward.host.clone(),
                 forward.kind.label().to_string(),
                 forward.bind.clone(),
@@ -772,6 +783,11 @@ impl ForwardForm {
             cursor: 0,
             editing: None,
         }
+    }
+
+    /// The group the rule will be saved into.
+    pub fn group(&self) -> &str {
+        self.values[0].trim()
     }
 
     pub fn field(&self) -> ForwardField {
@@ -790,22 +806,26 @@ impl ForwardForm {
     /// line update while the form is still open.
     pub fn to_forward(&self) -> Forward {
         Forward {
-            host: self.values[0].clone(),
+            host: self.values[1].clone(),
             kind: Kind::ALL
                 .into_iter()
-                .find(|k| k.label() == self.values[1])
+                .find(|k| k.label() == self.values[2])
                 .unwrap_or(Kind::Local),
-            bind: self.values[2].clone(),
-            target: self.values[3].clone(),
-            note: self.values[4].clone(),
+            bind: self.values[3].clone(),
+            target: self.values[4].clone(),
+            note: self.values[5].clone(),
         }
     }
 
-    pub fn begin_edit(&mut self, config: &SshConfig) {
+    /// `groups` are the profile names that already exist; typing over the pick
+    /// (`Tab`) is what creates a new one, so there is no separate "new group"
+    /// step and no way to end up with a group that holds nothing.
+    pub fn begin_edit(&mut self, config: &SshConfig, groups: &[String]) {
         let field = self.field();
         self.editing = Some(if field.is_pick() {
             let options: Vec<String> = match field {
                 ForwardField::Kind => Kind::ALL.iter().map(|k| k.label().to_string()).collect(),
+                ForwardField::Group => groups.to_vec(),
                 _ => config
                     .hosts
                     .iter()
