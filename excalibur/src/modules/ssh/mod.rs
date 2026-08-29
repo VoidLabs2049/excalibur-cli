@@ -1130,6 +1130,95 @@ mod tests {
         }
     }
 
+    fn meter(uptime_secs: u64, rate: Option<f64>) -> state::Meter {
+        state::Meter {
+            usage: supervisor::Usage {
+                uptime: std::time::Duration::from_secs(uptime_secs),
+                read: 0,
+            },
+            rate,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_live_rule_shows_how_long_it_has_been_up_and_how_fast() {
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(4242, &forward("39001").spec())];
+        module
+            .state
+            .meters
+            .insert(4242, meter(8055, Some(1_250_000.0)));
+
+        let out = rendered(&module);
+        assert!(out.contains("2h14m"), "no uptime on the row");
+        assert!(out.contains("1.2M/s"), "no rate on the row");
+        assert!(out.contains("traffic  1.2M/s"), "no total in the summary");
+    }
+
+    #[test]
+    fn a_tunnel_that_is_up_and_idle_is_told_apart_from_one_not_measured_yet() {
+        // Different answers, and the second is the interesting one: three green
+        // lights and nothing going through. `0B/s` for both would hide it.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(4242, &forward("39001").spec())];
+
+        module.state.meters.insert(4242, meter(30, None));
+        assert!(!rendered(&module).contains("B/s"), "invented a rate");
+
+        module.state.meters.insert(4242, meter(30, Some(0.0)));
+        assert!(rendered(&module).contains("0B/s"), "idle not distinguished");
+    }
+
+    #[test]
+    fn the_summary_counts_incomplete_rules_apart_from_stopped_ones() {
+        // In "1 of 3 up" a rule ssh would refuse looks exactly like one that
+        // simply has not been started.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![(
+                "daily",
+                vec![forward("39001"), forward("39002"), incomplete_rule()],
+            )],
+        );
+        module.state.running = vec![running(4242, &forward("39001").spec())];
+        assert_eq!(module.state.tallies(), (1, 1, 1));
+        assert!(rendered(&module).contains("1 incomplete"));
+    }
+
+    #[test]
+    fn a_meter_lasts_exactly_as_long_as_the_process_it_measured() {
+        // Left behind, a dead process's last rate sits on screen looking live.
+        // This process stands in for a live tunnel so the real /proc read is
+        // exercised rather than mocked away.
+        let alive = std::process::id();
+        let mut module = SshModule::new();
+        module.state.running = vec![
+            running(alive, "1:localhost:1"),
+            running(NO_SUCH_PID, "2:localhost:2"),
+        ];
+
+        module.state.sample_meters();
+        assert!(
+            module.state.meter(alive).is_some(),
+            "a live one was dropped"
+        );
+        assert!(module.state.meter(NO_SUCH_PID).is_none(), "a dead one kept");
+        assert!(
+            module.state.meter(alive).unwrap().rate.is_none(),
+            "one sample cannot be a rate"
+        );
+
+        module.state.sample_meters();
+        assert!(
+            module.state.meter(alive).unwrap().rate.is_some(),
+            "two samples did not produce a rate"
+        );
+    }
+
     #[test]
     fn only_the_processes_no_rule_claims_are_listed_as_unclaimed() {
         let mut module = SshModule::new();

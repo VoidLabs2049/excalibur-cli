@@ -2,7 +2,7 @@ use super::effective::{self, Effective};
 use super::form::{Field, ForwardForm, HostForm, write_config};
 use super::probe::Health;
 use super::sshconfig::{HostBlock, SshConfig};
-use super::supervisor::{self, Running};
+use super::supervisor::{self, Running, Usage};
 use super::tunnels::{Forward, Kind, Profile, Tunnels};
 use super::worker::{Job, Outcome, Slot, Worker};
 use std::collections::{HashMap, HashSet};
@@ -14,6 +14,21 @@ const NOTIFICATION_TTL: Duration = Duration::from_secs(5);
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// The end-to-end probe costs a TCP round trip per rule, so it runs rarely.
 const PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// One process's last measurement, plus the rate that came out of comparing it
+/// with the one before.
+///
+/// A rate needs two samples, so the previous reading has to be kept somewhere;
+/// this is that somewhere.
+#[derive(Debug, Clone, Copy)]
+pub struct Meter {
+    pub usage: Usage,
+    /// Bytes per second since the previous sample. `None` until there has been
+    /// a previous sample -- which is not the same as zero, and must not be
+    /// drawn as if it were.
+    pub rate: Option<f64>,
+    pub at: Instant,
+}
 
 /// Top-level screens inside the SSH module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +107,9 @@ pub struct SshState {
     /// Tunnel processes found on this machine, refreshed on a timer.
     pub running: Vec<Running>,
     pub health: HashMap<Slot, Health>,
+    /// Keyed by pid, not by slot: what is measured is a process, and the rule it
+    /// belongs to can change under it.
+    pub meters: HashMap<u32, Meter>,
     worker: Worker,
     last_scan: Option<Instant>,
     last_probe: Option<Instant>,
@@ -118,6 +136,7 @@ impl SshState {
             marked: HashSet::new(),
             running: Vec::new(),
             health: HashMap::new(),
+            meters: HashMap::new(),
             worker: Worker::spawn(),
             last_scan: None,
             last_probe: None,
@@ -575,6 +594,7 @@ impl SshState {
         if due(self.last_scan, SCAN_INTERVAL) {
             self.running = supervisor::scan();
             self.last_scan = Some(Instant::now());
+            self.sample_meters();
             // A rule with no process has nothing left to measure. Collected
             // first because `pid_at` borrows the state the retain would own.
             let live: Vec<Slot> = self
@@ -591,6 +611,45 @@ impl SshState {
         if due(self.last_probe, PROBE_INTERVAL) {
             self.request_probe();
         }
+    }
+
+    /// Re-read every claimed process and turn the difference into a rate.
+    ///
+    /// Only pids that came out of `scan()` are read, so every measurement is of
+    /// a process already confirmed by its argv to be an ssh forward. Reading a
+    /// pid from anywhere else would risk charting a process that is not the one
+    /// meant -- and nothing about the numbers would look wrong.
+    pub(super) fn sample_meters(&mut self) {
+        let now = Instant::now();
+        let mut fresh = HashMap::with_capacity(self.running.len());
+        for process in &self.running {
+            let Some(usage) = supervisor::usage(process.pid) else {
+                continue;
+            };
+            // A pid reused by a different process would show as a huge negative
+            // delta; `checked_sub` drops it rather than inventing a rate.
+            let rate = self.meters.get(&process.pid).and_then(|last| {
+                let bytes = usage.read.checked_sub(last.usage.read)?;
+                let elapsed = now.duration_since(last.at).as_secs_f64();
+                (elapsed > 0.0).then(|| bytes as f64 / elapsed)
+            });
+            fresh.insert(
+                process.pid,
+                Meter {
+                    usage,
+                    rate,
+                    at: now,
+                },
+            );
+        }
+        // Whatever is not in `fresh` has exited; keeping it would leave a dead
+        // process's last rate on screen looking live.
+        self.meters = fresh;
+    }
+
+    /// What the process behind `pid` has been doing, once there is a reading.
+    pub fn meter(&self, pid: u32) -> Option<&Meter> {
+        self.meters.get(&pid)
     }
 
     pub fn request_probe(&mut self) {
@@ -816,6 +875,30 @@ impl SshState {
             .into_iter()
             .filter(|slot| self.pid_at(*slot).is_some())
             .count()
+    }
+
+    /// Rules that are up, down, and unrunnable.
+    ///
+    /// Incomplete is counted apart from stopped because "1 of 3 up" makes a rule
+    /// ssh would refuse look exactly like one you simply have not started.
+    pub fn tallies(&self) -> (usize, usize, usize) {
+        let (mut up, mut stopped, mut incomplete) = (0, 0, 0);
+        for slot in self.tunnels.all() {
+            match self.tunnels.get(slot.0, slot.1) {
+                Some(rule) if rule.problem().is_some() => incomplete += 1,
+                Some(_) if self.pid_at(slot).is_some() => up += 1,
+                Some(_) => stopped += 1,
+                None => {}
+            }
+        }
+        (up, stopped, incomplete)
+    }
+
+    /// Bytes per second across every ssh forward on this machine, once at least
+    /// one of them has been measured twice.
+    pub fn total_rate(&self) -> Option<f64> {
+        let rates: Vec<f64> = self.meters.values().filter_map(|m| m.rate).collect();
+        (!rates.is_empty()).then(|| rates.iter().sum())
     }
 
     /// Live and total rule counts for one profile, for its heading.

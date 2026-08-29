@@ -106,6 +106,14 @@ different outcome.
   a terminal resolving them wide shifts every following line one column.
   `Forward::flow()` decides who listens and who resolves the exit;
   `ui::flow_lines()` only draws.
+- **`usage()` reads `rchar`, not `rchar + wchar`.** A forwarder reads each
+  payload byte once and writes it once, so `rchar` alone already covers the
+  traffic; adding `wchar` counts the same bytes twice and doubles every rate.
+- **`sample_meters()` may only read pids that came out of `scan()`.** Identity
+  by argv first, measurement second — otherwise the numbers describe a process
+  that was never the one meant, and nothing about them looks wrong.
+- **A rate of `None` is not a rate of zero.** `None` is "no second sample yet";
+  `Some(0.0)` is a live tunnel carrying nothing, which is the interesting one.
 
 ## Data flow
 
@@ -135,7 +143,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-137 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+141 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.

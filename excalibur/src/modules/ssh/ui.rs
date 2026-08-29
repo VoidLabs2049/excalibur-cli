@@ -2,7 +2,7 @@ use super::effective::Effective;
 use super::form::{Change, Editing, Field, ForwardField, ForwardForm, HostForm};
 use super::probe::{Health, Light};
 use super::sshconfig::HostBlock;
-use super::state::{MENU, Screen, SshState};
+use super::state::{MENU, Meter, Screen, SshState};
 use super::tunnels::Forward;
 use ratatui::{
     buffer::Buffer,
@@ -13,6 +13,7 @@ use ratatui::{
         Block, BorderType, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
+use std::time::Duration;
 
 /// How many host rows the menu preview shows before eliding.
 const MENU_PREVIEW_ROWS: usize = 12;
@@ -1010,7 +1011,9 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        // Four, not three: the legend, the tallies, and a detail line that is
+        // sometimes long enough to wrap onto a second.
+        .constraints([Constraint::Min(3), Constraint::Length(4)])
         .split(inner);
 
     // Rules are grouped under their profile, so the item index is no longer the
@@ -1057,11 +1060,15 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
             ];
             line.push(match (broken, state.pid_at(slot)) {
                 (true, _) => Span::styled("incomplete", Style::default().fg(Color::Red)),
-                (false, Some(pid)) => {
-                    Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray))
-                }
+                (false, Some(pid)) => Span::styled(
+                    format!("{:<11}", format!("pid {pid}")),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 (false, None) => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
             });
+            if let Some(meter) = state.pid_at(slot).and_then(|pid| state.meter(pid)) {
+                line.extend(meter_spans(meter));
+            }
 
             let mut style = Style::default();
             if row == state.forward_index {
@@ -1087,14 +1094,21 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
             // the first of the three could be answered here anyway. `?` keeps the
             // column width so the summary and the pid stay in line.
             items.push(
-                ListItem::new(Line::from(vec![
-                    Span::styled("   ?      ", Style::default().fg(Color::Yellow)),
-                    Span::raw(format!("{:<34}", truncate(&running.summary(), 34))),
-                    Span::styled(
-                        format!("pid {}", running.pid),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]))
+                ListItem::new(Line::from(
+                    vec![
+                        Span::styled("   ?      ", Style::default().fg(Color::Yellow)),
+                        Span::raw(format!("{:<34}", truncate(&running.summary(), 34))),
+                        Span::styled(
+                            format!("{:<11}", format!("pid {}", running.pid)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]
+                    .into_iter()
+                    // How long a stranded process has been sitting there is part of
+                    // deciding whether to keep it.
+                    .chain(state.meter(running.pid).into_iter().flat_map(meter_spans))
+                    .collect::<Vec<_>>(),
+                ))
                 .style(style),
             );
             row += 1;
@@ -1126,11 +1140,34 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
             })
             .unwrap_or_default(),
     };
+    let (up, stopped, incomplete) = state.tallies();
     let legend = vec![
         Line::from(Span::styled(
             "  process / listening / path        * up   x failed   - not observable   o stopped",
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(vec![
+            Span::styled(
+                format!("  {:<24}", format!("{up} up · {stopped} stopped")),
+                Style::default().fg(Color::DarkGray),
+            ),
+            // Only when there are any: a standing "0 incomplete" trains the eye
+            // to skip the column the one time it is not zero.
+            Span::styled(
+                match incomplete {
+                    0 => String::new(),
+                    n => format!("{n} incomplete"),
+                },
+                Style::default().fg(Color::Red),
+            ),
+            Span::styled(
+                match state.total_rate() {
+                    Some(rate) => format!("      traffic  {}", byte_rate(Some(rate))),
+                    None => String::new(),
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
         Line::from(Span::styled(
             format!("  {detail}"),
             Style::default().fg(Color::Yellow),
@@ -1210,6 +1247,55 @@ fn flow_lines(forward: &Forward) -> Vec<Line<'static>> {
             Span::styled(flow.leaves_at, Style::default().fg(Color::Yellow)),
         ]),
     ]
+}
+
+/// How long a tunnel has been up and how fast it is moving bytes.
+///
+/// Uptime comes first so that it is the rate, not the uptime, that falls off a
+/// narrow terminal: "did this just restart" is asked more often than "how fast".
+fn meter_spans(meter: &Meter) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!("{:>7}   ", uptime(meter.usage.uptime)),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("{:>8}", byte_rate(meter.rate)),
+            Style::default().fg(if meter.rate.is_some_and(|r| r > 0.0) {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
+        ),
+    ]
+}
+
+/// `2h14m` / `14m07s` / `41s`. Days are left as hours -- a tunnel up for three
+/// days reads better as `72h00m` than as a unit that has to be converted back.
+fn uptime(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds}s"),
+        (0, _) => format!("{minutes}m{seconds:02}s"),
+        _ => format!("{hours}h{minutes:02}m"),
+    }
+}
+
+/// A rate, or `-` when there has not been a second sample yet.
+///
+/// "not measured yet" and "measured, moving nothing" are different answers, and
+/// the second is the interesting one: a tunnel that is up and carrying nothing.
+/// Printing `0B/s` for both would hide it.
+fn byte_rate(rate: Option<f64>) -> String {
+    let Some(rate) = rate else {
+        return "-".to_string();
+    };
+    match rate {
+        r if r >= 1e6 => format!("{:.1}M/s", r / 1e6),
+        r if r >= 1e3 => format!("{:.1}k/s", r / 1e3),
+        r => format!("{r:.0}B/s"),
+    }
 }
 
 /// Heading for the processes no rule claims.

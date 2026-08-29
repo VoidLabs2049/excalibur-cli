@@ -2,6 +2,7 @@ use super::tunnels::{Forward, Kind};
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// A tunnel process found on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +112,45 @@ pub fn scan() -> Vec<Running> {
 #[cfg(not(target_os = "linux"))]
 pub fn scan() -> Vec<Running> {
     Vec::new()
+}
+
+/// What one tunnel process has been doing, as opposed to what it is.
+///
+/// Kept apart from [`Running`] on purpose: `Running` answers "which rule is this
+/// process", and nothing here may be read until that answer exists. Measuring
+/// first and identifying afterwards is how you end up carefully charting a
+/// process that was never the one you meant (see ~/.claude/remote-ops.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub uptime: Duration,
+    /// Bytes the process has read.
+    ///
+    /// A forwarder reads each payload byte once on its way in and writes it once
+    /// on its way out, in both directions, so `rchar` alone already tracks
+    /// everything through the tunnel -- adding `wchar` counts the same bytes
+    /// twice and silently doubles every rate on screen.
+    pub read: u64,
+}
+
+/// Measure a process that has *already* been confirmed to be the tunnel's.
+#[cfg(target_os = "linux")]
+pub fn usage(pid: u32) -> Option<Usage> {
+    let process = procfs::process::Process::new(i32::try_from(pid).ok()?).ok()?;
+    let started = procfs::boot_time_secs().ok()?
+        + process.stat().ok()?.starttime / procfs::ticks_per_second();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(Usage {
+        uptime: Duration::from_secs(now.saturating_sub(started)),
+        read: process.io().ok()?.rchar,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn usage(_pid: u32) -> Option<Usage> {
+    None
 }
 
 /// The process serving `forward`, if one is up.

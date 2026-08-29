@@ -198,7 +198,7 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ## 9. 待落地
 
-共 11 项(A 组、B1、C3 已完成)。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,
+共 11 项(A 组、B 组、C3 已完成)。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,
 优先于其余。
 
 ### A · 转发组与多选
@@ -341,13 +341,42 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 **只用 `│`**,不用 `▼`/`→` —— 这类字符是东亚歧义宽度,终端按宽字符解析的话,
 其后每一行都会错位一列。
 
-**B2 · 仪表盘统计** —— 每条:运行时长 + 吞吐速率;汇总:up / stopped / incomplete
-计数与总速率;选中项画 sparkline。数据源 `/proc/<pid>/stat` 的 starttime 与
-`/proc/<pid>/io` 的 rchar+wchar。
+~~**B2 · 仪表盘统计**~~ —— **2026-08-29 完成**(141 个测试)。
+
+```
+ daily                                      1/3 up
+   * - -  -L 39001:localhost:9001 kami      pid 4242     2h14m     1.2M/s
+          minio console
+   o o o  -L 39002:localhost:9002 kami      stopped
+   o o o  -L 22:6022 kami                   incomplete
+ unclaimed                                  1 not in any rule
+
+  process / listening / path        * up   x failed   - not observable   o stopped
+  1 up · 1 stopped        1 incomplete      traffic  1.2M/s
+```
 
 ⚠️ **读之前 pid 必须已由 argv 匹配确认属于目标隧道**,否则量的是别的进程
-(见 `~/.claude/remote-ops.md`「观测之前先确认观测对象是对的」)。
-实现上把计数与身份分开:`supervisor::usage(pid) -> Usage`,不塞进 `Running`。
+(见 `~/.claude/remote-ops.md`「观测之前先确认观测对象是对的」)。已按计划把计数与
+身份分开:`supervisor::usage(pid) -> Usage` 独立于 `Running`,而 `sample_meters()`
+**只读 `scan()` 返回过的 pid** —— 身份先立住,再谈测量。
+
+几处与原计划不同:
+
+- **只读 `rchar`,不是 `rchar + wchar`。** 转发进程对每个载荷字节读一次、写一次
+  (两个方向都如此),所以 `rchar` 本身已覆盖穿过隧道的全部流量;加上 `wchar` 是把
+  同一批字节数两遍,**屏幕上每个速率都会静默翻倍**。
+- **「还没测」和「测了是 0」必须分开。** 速率是 `Option<f64>`,只有一次采样时显示
+  `-`。三盏绿灯却 `0B/s` 正是有价值的那个状态(隧道通着、没人用),把两者都印成
+  `0B/s` 会把它藏起来。
+- **incomplete 单独计数。** 在「1 of 3 up」里,一条 ssh 会拒绝的规则和一条你只是
+  还没启动的规则长得一模一样。为 0 时不显示 —— 常驻的「0 incomplete」会训练眼睛
+  跳过这一列,恰好在它不为 0 的那次。
+- **计量按 pid 存,不按 slot。** 量的是进程,规则可以在它下面被改掉。进程退出时
+  条目立即丢弃,否则死进程最后一次的速率会留在屏幕上,看着像活的。
+- **运行时长排在速率前面**,所以窄终端先截掉的是速率 —— 「是不是刚重启过」比
+  「多快」问得频繁。
+- ~~sparkline~~ **暂缓**。它需要一份 per-pid 的历史环形缓冲,而上面那些问题一个
+  数字就答完了。等出现「想看抖动/毛刺」的真实需求再说。
 
 ### C · 兑现 §5「信任机制」里承诺过但没落地的
 
@@ -420,7 +449,10 @@ yaml 是本工具自己写的、结构简单,风险低于 config,但值得对齐
 
 ### 风险点
 
-A3 的作用域是隐式模态(靠底栏文案兜)、B2 的 pid 归属。
+A3 的作用域是隐式模态(靠底栏文案兜)。
+
+~~B2 的 pid 归属~~ —— `sample_meters()` 只读 `scan()` 返回过的 pid,身份由 argv
+结构确认在先,测量在后。
 
 ~~C3 与既有认领逻辑的边界~~ —— 已按「无主 = `scan()` 有而 `find()` 无」落地,
 没有引入任何模式匹配兜底。
