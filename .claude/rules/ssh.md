@@ -37,11 +37,13 @@ CLI: `cargo run -- ssh`, alias `t` (`s` was taken by settings).
 | `supervisor.rs` | `parse_argv` / `scan` / `find` / `start` / `stop` |
 | `probe.rs` | `Health` — the three lights; `/proc/net/tcp` listen check and end-to-end connect |
 | `worker.rs` | `Job`/`Outcome` channels so blocking work stays off the render thread |
+| `discover.rs` | `ss -tlnH` / `netstat -tln` over ssh, parsed into `Listener`s |
 
 ## Screens
 
 `Screen::Menu` (landing, preview pane) → `Config` (host list + form) /
 `Forward` (tunnel profiles + form) / `Dashboard` (live tunnels).
+`Discover` (a host's listening ports) hangs off `Config` via `d`, not off the menu.
 The cursor starts on `Dashboard`, not the top entry — it is the high-frequency path.
 
 ## The three lights
@@ -112,6 +114,14 @@ different outcome.
 - **`sample_meters()` may only read pids that came out of `scan()`.** Identity
   by argv first, measurement second — otherwise the numbers describe a process
   that was never the one meant, and nothing about them looks wrong.
+- **A discovery answer must be matched to the host still on screen.** An ssh
+  round trip can outlive the screen that asked; `apply_discovery` drops any
+  answer whose host is not the open one. The remote command is wrapped in
+  `sh -c '...'` because the login shell over there is fish, where a bare
+  `a || b` is a standing trap (`~/.claude/remote-ops.md`).
+- **`exits_on(host)` filters by host.** kami's 8080 and thor's 8080 are
+  different services; a bare port match reports one as already forwarded when
+  nothing forwards it.
 - **A rate of `None` is not a rate of zero.** `None` is "no second sample yet";
   `Some(0.0)` is a live tunnel carrying nothing, which is the interesting one.
 - **`effective::check` runs before every config write** and returns three
@@ -156,7 +166,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-150 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+161 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.

@@ -1,3 +1,4 @@
+use super::discover::Listener;
 use super::effective::{self, Effective};
 use super::form::{Field, ForwardForm, HostForm, write_config};
 use super::probe::Health;
@@ -41,6 +42,24 @@ pub enum Screen {
     Forward,
     /// Live tunnel dashboard.
     Dashboard,
+    /// What one host is listening on, with the ports pickable as new rules.
+    Discover,
+}
+
+/// One host's listening ports, and which of them are wanted as rules.
+#[derive(Debug)]
+pub struct Discovery {
+    pub host: String,
+    /// Loopback-only first, since those are the ones `-L` exists for.
+    pub listeners: Vec<Listener>,
+    /// Ports, not indices: the list is rebuilt on every refresh, so a position
+    /// would name a different port afterwards.
+    pub marked: HashSet<u16>,
+    pub cursor: usize,
+    /// Set while the ssh round trip is out. Nothing else says the screen is
+    /// waiting rather than empty.
+    pub asking: bool,
+    pub error: Option<String>,
 }
 
 /// One entry of the landing menu.
@@ -109,6 +128,8 @@ pub struct SshState {
     /// Rules picked out for the next start/stop. A `Slot` is a position, not an
     /// identity, so this is emptied whenever the file underneath it can shift.
     pub marked: HashSet<Slot>,
+    /// The open port-discovery screen, if any.
+    pub discovery: Option<Discovery>,
 
     /// Tunnel processes found on this machine, refreshed on a timer.
     pub running: Vec<Running>,
@@ -141,6 +162,7 @@ impl SshState {
             forward_index: 0,
             forward_form: None,
             marked: HashSet::new(),
+            discovery: None,
             running: Vec::new(),
             health: HashMap::new(),
             meters: HashMap::new(),
@@ -286,13 +308,7 @@ impl SshState {
         let Some(port) = port else {
             return bind.to_string();
         };
-        let taken: std::collections::HashSet<u16> = self
-            .tunnels
-            .profiles
-            .iter()
-            .flat_map(|profile| &profile.forwards)
-            .filter_map(|forward| super::tunnels::port_of(&forward.bind))
-            .collect();
+        let taken = self.taken_binds();
         let mut candidate = port;
         loop {
             let Some(next) = candidate.checked_add(1) else {
@@ -303,6 +319,32 @@ impl SshState {
                 return format!("{prefix}{candidate}");
             }
         }
+    }
+
+    /// Exit ports already forwarded **on this host**, for flagging a discovered
+    /// port that is already covered.
+    ///
+    /// Filtered by host on purpose: kami's 8080 and thor's 8080 are different
+    /// services, and a bare port match would tell you one is already covered
+    /// when nothing forwards it at all.
+    pub fn exits_on(&self, host: &str) -> HashSet<u16> {
+        self.tunnels
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.forwards)
+            .filter(|forward| forward.host == host)
+            .filter_map(|forward| super::tunnels::port_of(&forward.target))
+            .collect()
+    }
+
+    /// Every port some rule already listens on. Two rules cannot share one.
+    fn taken_binds(&self) -> HashSet<u16> {
+        self.tunnels
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.forwards)
+            .filter_map(|forward| super::tunnels::port_of(&forward.bind))
+            .collect()
     }
 
     fn group_name(&self, profile: usize) -> String {
@@ -579,6 +621,172 @@ impl SshState {
         }
     }
 
+    /// Ask the selected host what it is listening on.
+    ///
+    /// The answer takes a network round trip, so it goes through the worker and
+    /// the screen opens straight away in its waiting state -- a UI that freezes
+    /// for several seconds is indistinguishable from one that has hung.
+    pub fn discover_selected_host(&mut self) {
+        let Some(host) = self.selected_host().map(|h| h.alias().to_string()) else {
+            self.notify("No host selected");
+            return;
+        };
+        self.worker.submit(Job::Discover(host.clone()));
+        self.discovery = Some(Discovery {
+            host,
+            listeners: Vec::new(),
+            marked: HashSet::new(),
+            cursor: 0,
+            asking: true,
+            error: None,
+        });
+        self.screen = Screen::Discover;
+    }
+
+    /// Take an answer that came back over the channel.
+    ///
+    /// Dropped unless the screen is still open on that same host: an ssh round
+    /// trip can outlive the screen that asked, and a late answer must not
+    /// repopulate one already closed or now asking about somebody else.
+    pub(super) fn apply_discovery(&mut self, host: String, found: Result<Vec<Listener>, String>) {
+        let Some(open) = &mut self.discovery else {
+            return;
+        };
+        if open.host != host {
+            return;
+        }
+        open.asking = false;
+        match found {
+            Ok(listeners) => {
+                open.listeners = listeners;
+                open.cursor = 0;
+            }
+            Err(e) => open.error = Some(e),
+        }
+    }
+
+    pub fn discover_next(&mut self) {
+        if let Some(found) = &mut self.discovery
+            && !found.listeners.is_empty()
+        {
+            found.cursor = (found.cursor + 1) % found.listeners.len();
+        }
+    }
+
+    pub fn discover_previous(&mut self) {
+        if let Some(found) = &mut self.discovery
+            && !found.listeners.is_empty()
+        {
+            let len = found.listeners.len();
+            found.cursor = (found.cursor + len - 1) % len;
+        }
+    }
+
+    pub fn toggle_discovered(&mut self) {
+        let Some(found) = &mut self.discovery else {
+            return;
+        };
+        let Some(port) = found.listeners.get(found.cursor).map(|l| l.port) else {
+            return;
+        };
+        if !found.marked.remove(&port) {
+            found.marked.insert(port);
+        }
+    }
+
+    /// Mark every loopback-only port, which is usually the whole reason for
+    /// being on this screen.
+    pub fn mark_loopback_ports(&mut self) {
+        let Some(found) = &mut self.discovery else {
+            return;
+        };
+        let loopback: HashSet<u16> = found
+            .listeners
+            .iter()
+            .filter(|l| l.loopback)
+            .map(|l| l.port)
+            .collect();
+        if loopback.iter().all(|port| found.marked.contains(port)) {
+            found.marked.retain(|port| !loopback.contains(port));
+        } else {
+            found.marked.extend(loopback);
+        }
+    }
+
+    /// Turn the marked ports into `-L` rules in a group named after the host.
+    ///
+    /// The whole point of the screen: five ports found on kami become five
+    /// rules in one keystroke, instead of six fields typed five times.
+    pub fn adopt_discovered(&mut self) {
+        let count = match self.take_discovered() {
+            Ok(count) => count,
+            Err(why) => return self.notify(why),
+        };
+        let host = self.discovery.take().map(|f| f.host).unwrap_or_default();
+        match self.tunnels.save() {
+            Ok(_) => {
+                self.screen = Screen::Forward;
+                self.notify(format!("Added {count} rule(s) to group `{host}`"));
+            }
+            Err(e) => self.notify(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Fold the marked ports into the model. Split from the write for the same
+    /// reason as [`Self::apply_forward_form`].
+    pub(super) fn take_discovered(&mut self) -> Result<usize, String> {
+        let Some(found) = &self.discovery else {
+            return Err("nothing to add".to_string());
+        };
+        if found.marked.is_empty() {
+            return Err("Nothing marked -- Space picks a port".to_string());
+        }
+        let host = found.host.clone();
+        // Sorted, so the rules land in the order they were shown rather than in
+        // whatever order the set iterates.
+        let mut ports: Vec<u16> = found.marked.iter().copied().collect();
+        ports.sort_unstable();
+
+        let group = match self.tunnels.profiles.iter().position(|p| p.name == host) {
+            Some(existing) => existing,
+            None => {
+                self.tunnels.profiles.push(Profile {
+                    name: host.clone(),
+                    forwards: Vec::new(),
+                });
+                self.tunnels.profiles.len() - 1
+            }
+        };
+        for port in &ports {
+            // Same number locally where nothing has claimed it -- one number to
+            // remember instead of two.
+            let bind = self.free_bind_from(*port);
+            self.tunnels.profiles[group].forwards.push(Forward {
+                host: host.clone(),
+                kind: Kind::Local,
+                bind,
+                target: format!("localhost:{port}"),
+                note: format!("found listening on {host}"),
+            });
+        }
+        // Positions after the new rules have all shifted.
+        self.marked.clear();
+        Ok(ports.len())
+    }
+
+    /// `port` itself when no rule listens on it, else the next one that is free.
+    fn free_bind_from(&self, port: u16) -> String {
+        let taken = self.taken_binds();
+        let mut candidate = port;
+        while taken.contains(&candidate) {
+            let Some(next) = candidate.checked_add(1) else {
+                return port.to_string();
+            };
+            candidate = next;
+        }
+        candidate.to_string()
+    }
+
     /// Whether the file differs from the one this session started on.
     pub fn can_undo(&self) -> bool {
         self.pristine
@@ -656,6 +864,7 @@ impl SshState {
                     self.last_probe = None;
                 }
                 Outcome::Probed(results) => self.health.extend(results),
+                Outcome::Discovered(host, found) => self.apply_discovery(host, found),
             }
         }
 

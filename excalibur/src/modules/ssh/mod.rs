@@ -1,3 +1,4 @@
+mod discover;
 mod effective;
 mod form;
 mod probe;
@@ -113,6 +114,12 @@ impl SshModule {
             // navigation keys under a finger.
             KeyCode::Char('U') => {
                 self.state.undo_config();
+                Ok(ModuleAction::None)
+            }
+            // Discovery starts from a host rather than from the forward list,
+            // so the host is already chosen and there is no picker step.
+            KeyCode::Char('d') => {
+                self.state.discover_selected_host();
                 Ok(ModuleAction::None)
             }
             KeyCode::Enter => {
@@ -279,6 +286,24 @@ impl SshModule {
         }
     }
 
+    fn handle_discover_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.discovery = None;
+                self.state.screen = Screen::Config;
+            }
+            KeyCode::Char('q') => return Ok(ModuleAction::Exit),
+            KeyCode::Up | KeyCode::Char('k') => self.state.discover_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.state.discover_next(),
+            KeyCode::Char(' ') => self.state.toggle_discovered(),
+            KeyCode::Char('l') => self.state.mark_loopback_ports(),
+            KeyCode::Char('r') => self.state.discover_selected_host(),
+            KeyCode::Enter => self.state.adopt_discovered(),
+            _ => {}
+        }
+        Ok(ModuleAction::None)
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
         match key.code {
             KeyCode::Esc => self.state.goto(Screen::Menu),
@@ -338,6 +363,7 @@ impl Module for SshModule {
             Screen::Config => self.handle_config_key(key_event),
             Screen::Forward => self.handle_forward_key(key_event),
             Screen::Dashboard => self.handle_dashboard_key(key_event),
+            Screen::Discover => self.handle_discover_key(key_event),
         }
     }
 
@@ -1134,6 +1160,136 @@ mod tests {
             spec: spec.into(),
             host: "nowhere".into(),
         }
+    }
+
+    fn listener(port: u16, loopback: bool) -> discover::Listener {
+        discover::Listener {
+            port,
+            address: if loopback { "127.0.0.1" } else { "0.0.0.0" }.into(),
+            loopback,
+        }
+    }
+
+    /// A discovery screen already holding an answer, so no ssh runs.
+    fn discovered(module: &mut SshModule, host: &str, listeners: Vec<discover::Listener>) {
+        module.state.discovery = Some(state::Discovery {
+            host: host.into(),
+            listeners,
+            marked: std::collections::HashSet::new(),
+            cursor: 0,
+            asking: false,
+            error: None,
+        });
+        module.state.screen = Screen::Discover;
+    }
+
+    #[test]
+    fn d_opens_the_port_list_for_the_host_under_the_cursor() {
+        // `.invalid` is reserved and never resolves, so the worker's ssh fails
+        // instantly instead of dialling anything real.
+        let mut module = on_config_screen("Host probe.invalid\n  Port 22\n");
+        press(&mut module, KeyCode::Char('d'));
+        assert_eq!(module.state.screen, Screen::Discover);
+        let open = module.state.discovery.as_ref().expect("a screen opened");
+        assert_eq!(open.host, "probe.invalid");
+        assert!(open.asking, "does not say it is waiting on the round trip");
+        assert!(
+            rendered(&module).contains("asking probe.invalid"),
+            "an empty list and a pending one look the same"
+        );
+    }
+
+    #[test]
+    fn loopback_ports_lead_and_say_why_they_are_the_interesting_ones() {
+        let mut module = SshModule::new();
+        discovered(
+            &mut module,
+            "kami",
+            vec![
+                listener(631, true),
+                listener(8080, true),
+                listener(22, false),
+            ],
+        );
+        let out = rendered(&module);
+        assert!(out.contains("Listening on kami"));
+        assert!(
+            out.contains("reachable no other way"),
+            "does not say why a loopback port is the one to pick"
+        );
+        assert!(out.contains("already reachable directly"));
+    }
+
+    #[test]
+    fn marked_ports_become_a_group_of_rules_named_after_the_host() {
+        // The payoff: five ports found on one host become five rules in a
+        // keystroke instead of six fields typed five times.
+        let mut module = SshModule::new();
+        discovered(
+            &mut module,
+            "kami",
+            vec![listener(631, true), listener(8080, true)],
+        );
+        press(&mut module, KeyCode::Char('l')); // every loopback port
+        assert_eq!(module.state.take_discovered(), Ok(2));
+
+        let group = &module.state.tunnels.profiles[0];
+        assert_eq!(group.name, "kami", "the group is not named after the host");
+        // Sorted, so they land in the order they were shown rather than in
+        // whatever order the set iterated.
+        let binds: Vec<&str> = group.forwards.iter().map(|f| f.bind.as_str()).collect();
+        assert_eq!(binds, ["631", "8080"]);
+        let exits: Vec<&str> = group.forwards.iter().map(|f| f.target.as_str()).collect();
+        assert_eq!(exits, ["localhost:631", "localhost:8080"]);
+        assert!(group.forwards.iter().all(|f| f.host == "kami"));
+    }
+
+    #[test]
+    fn a_discovered_port_already_bound_by_a_rule_moves_to_the_next_free_one() {
+        // Two rules cannot listen on the same port, so reusing it would produce
+        // a pair that can never both be up.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("8080")])]);
+        discovered(&mut module, "kami", vec![listener(8080, true)]);
+        press(&mut module, KeyCode::Char(' '));
+        module.state.take_discovered().unwrap();
+
+        let added = module.state.tunnels.profiles[1].forwards[0].clone();
+        assert_eq!(added.bind, "8081", "reused a port a rule already binds");
+        assert_eq!(added.target, "localhost:8080", "the exit moved with it");
+    }
+
+    #[test]
+    fn adding_nothing_says_how_to_pick_rather_than_writing_an_empty_group() {
+        let mut module = SshModule::new();
+        discovered(&mut module, "kami", vec![listener(631, true)]);
+        assert!(module.state.take_discovered().is_err());
+        assert!(module.state.tunnels.profiles.is_empty(), "an empty group");
+    }
+
+    #[test]
+    fn an_answer_for_a_host_no_longer_on_screen_is_dropped() {
+        // The ssh round trip can outlive the screen that asked for it.
+        let mut module = SshModule::new();
+        discovered(&mut module, "kami", Vec::new());
+        module
+            .state
+            .apply_discovery("thor".into(), Ok(vec![listener(631, true)]));
+        assert!(
+            module
+                .state
+                .discovery
+                .as_ref()
+                .unwrap()
+                .listeners
+                .is_empty(),
+            "thor's ports landed on kami's screen"
+        );
+
+        module
+            .state
+            .apply_discovery("kami".into(), Ok(vec![listener(631, true)]));
+        assert_eq!(module.state.discovery.unwrap().listeners.len(), 1);
     }
 
     #[test]

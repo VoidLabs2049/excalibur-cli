@@ -40,6 +40,7 @@ pub fn render(state: &SshState, area: Rect, buf: &mut Buffer) {
         Screen::Config => render_config(state, chunks[1], buf),
         Screen::Forward => render_forward(state, chunks[1], buf),
         Screen::Dashboard => render_dashboard(state, chunks[1], buf),
+        Screen::Discover => render_discover(state, chunks[1], buf),
     }
 
     render_help(state, chunks[2], buf);
@@ -90,7 +91,7 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             // advertises a key whose whole answer is "nothing to undo".
             let undo = if state.can_undo() { "   U: undo" } else { "" };
             format!(
-                " j/k: navigate   Enter: edit   g: ssh -G   /: search{undo}   Esc: back   q: quit{filter}"
+                " j/k: navigate   Enter: edit   d: ports   g: ssh -G   /: search{undo}   Esc: back{filter}"
             )
         }
         Screen::Forward
@@ -118,6 +119,16 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
         Screen::Forward => {
             " j/k: navigate   Enter: edit   n: new   c: clone   d: delete   Esc: back   q: quit"
                 .to_string()
+        }
+        Screen::Discover => {
+            let n = state.discovery.as_ref().map_or(0, |f| f.marked.len());
+            match n {
+                0 => " j/k: navigate   Space: pick   l: pick every loopback port   r: re-ask   Esc: back"
+                    .to_string(),
+                n => format!(
+                    " Enter: add {n} as -L rules   Space: pick   l: all loopback   r: re-ask   Esc: back"
+                ),
+            }
         }
         // `s`/`S` act on the marks when there are any and on the cursor when
         // there are not. That is one key meaning two things, so the scope is
@@ -198,8 +209,9 @@ fn render_menu(state: &SshState, area: Rect, buf: &mut Buffer) {
         Screen::Config => config_summary(state),
         Screen::Forward => forward_summary(state),
         Screen::Dashboard => dashboard_summary(state),
-        // MENU never lists itself, so this is unreachable in practice.
-        Screen::Menu => Vec::new(),
+        // MENU lists neither itself nor the discovery screen, which is reached
+        // from a host rather than from here.
+        Screen::Menu | Screen::Discover => Vec::new(),
     };
 
     Paragraph::new(body)
@@ -1299,6 +1311,98 @@ fn byte_rate(rate: Option<f64>) -> String {
         r if r >= 1e3 => format!("{:.1}k/s", r / 1e3),
         r => format!("{r:.0}B/s"),
     }
+}
+
+/// What one host is listening on, with the loopback-only ports up front.
+///
+/// Those are the ones that cannot be reached any other way, which is the whole
+/// reason `-L` exists -- so they lead and they are the only ones `l` picks.
+fn render_discover(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let Some(found) = &state.discovery else {
+        return;
+    };
+    let block = Block::bordered()
+        .title(format!(" Listening on {} ", found.host))
+        .border_type(BorderType::Rounded);
+
+    if found.asking {
+        Paragraph::new(format!("\n  asking {}...", found.host))
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray))
+            .render(area, buf);
+        return;
+    }
+    if let Some(error) = &found.error {
+        Paragraph::new(format!("\n  {error}"))
+            .block(block)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        return;
+    }
+    if found.listeners.is_empty() {
+        Paragraph::new(format!(
+            "\n  {} reports nothing listening on tcp",
+            found.host
+        ))
+        .block(block)
+        .style(Style::default().fg(Color::DarkGray))
+        .render(area, buf);
+        return;
+    }
+
+    let covered = state.exits_on(&found.host);
+    let items: Vec<ListItem> = found
+        .listeners
+        .iter()
+        .map(|listener| {
+            let note = match (listener.loopback, covered.contains(&listener.port)) {
+                // Said outright rather than left to be inferred from the
+                // address: it is the reason to pick this row.
+                (true, false) => "loopback only -- reachable no other way",
+                (true, true) => "loopback only -- a rule already exits here",
+                (false, true) => "already reachable -- a rule already exits here",
+                (false, false) => "already reachable directly",
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if found.marked.contains(&listener.port) {
+                        " + "
+                    } else {
+                        "   "
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:<8}", listener.port),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<24}", truncate(&listener.address, 24)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    note,
+                    Style::default().fg(if listener.loopback {
+                        Color::Green
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(found.cursor));
+    StatefulWidget::render(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        area,
+        buf,
+        &mut list_state,
+    );
 }
 
 /// Heading for the processes no rule claims.

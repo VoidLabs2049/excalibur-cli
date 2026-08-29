@@ -1,3 +1,4 @@
+use super::discover::{self, Listener};
 use super::probe::{self, Health};
 use super::supervisor;
 use super::tunnels::Forward;
@@ -14,6 +15,9 @@ pub enum Job {
     StopOrphan(u32),
     /// Measure every rule that currently has a process behind it.
     Probe(Vec<(Slot, Forward)>),
+    /// Ask a host what it is listening on. A real network round trip, so it
+    /// belongs here more than anything else in this enum.
+    Discover(String),
 }
 
 pub enum Outcome {
@@ -21,6 +25,7 @@ pub enum Outcome {
     Stopped(Slot, Result<(), String>),
     StoppedOrphan(u32, Result<(), String>),
     Probed(Vec<(Slot, Health)>),
+    Discovered(String, Result<Vec<Listener>, String>),
 }
 
 /// Runs the blocking work off the render thread.
@@ -55,6 +60,10 @@ impl Worker {
                         pid,
                         supervisor::stop(pid).map_err(|e| e.to_string()),
                     ),
+                    Job::Discover(host) => {
+                        let found = discover::listeners(&host).map_err(|e| e.to_string());
+                        Outcome::Discovered(host, found)
+                    }
                     Job::Probe(rules) => Outcome::Probed(
                         rules
                             .into_iter()
