@@ -2,7 +2,7 @@ use super::tunnels::{Forward, Kind};
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A tunnel process found on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +77,14 @@ pub fn parse_argv(argv: &[String]) -> Option<(Kind, String, String)> {
 
 /// Every ssh forward running under this user.
 ///
-/// Linux-only: it reads `/proc`. Elsewhere the dashboard shows everything as
-/// stopped rather than failing to build.
+/// Runs once a second on the render thread, which is why Linux keeps its own
+/// implementation instead of sharing the portable one: over ~650 processes
+/// `/proc` costs about 5ms and `sysinfo` 45-85ms, and the slow one drops frames
+/// every second on a screen whose whole point is that it stays live.
 ///
-/// Restricted to our own uid because `/proc/<pid>/cmdline` is world-readable:
-/// without it another user's tunnel is listed as unclaimed and offered for
-/// stopping, and the `kill` behind that offer can only fail.
+/// Both are restricted to our own uid, because argv is world-readable: without
+/// that another user's tunnel is listed as unclaimed and offered for stopping,
+/// and the `kill` behind that offer can only fail.
 #[cfg(target_os = "linux")]
 pub fn scan() -> Vec<Running> {
     let Ok(processes) = procfs::process::all_processes() else {
@@ -111,7 +113,53 @@ pub fn scan() -> Vec<Running> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn scan() -> Vec<Running> {
-    Vec::new()
+    scan_portable()
+}
+
+/// [`scan`] for everything without `/proc`, macOS included.
+///
+/// `sysinfo::Process::cmd` is real argv there (it reads `KERN_PROCARGS2`), which
+/// is what [`parse_argv`] needs: re-splitting the space-joined line that `ps`
+/// prints would quietly mis-parse any argument containing a space, and claiming
+/// by argv structure is the one thing this module will not trade away.
+///
+/// Compiled on Linux too, but only for the test below -- otherwise the macOS
+/// path would first be built on a Mac, which is where it is hardest to fix.
+#[cfg(any(not(target_os = "linux"), test))]
+fn scan_portable() -> Vec<Running> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_user(UpdateKind::Always),
+    );
+    let me = sysinfo::get_current_pid()
+        .ok()
+        .and_then(|pid| system.process(pid))
+        .and_then(|process| process.user_id().cloned());
+    system
+        .processes()
+        .values()
+        .filter(|process| me.is_none() || process.user_id() == me.as_ref())
+        .filter_map(|process| {
+            let argv: Vec<String> = process
+                .cmd()
+                .iter()
+                .map(|word| word.to_string_lossy().into_owned())
+                .collect();
+            let (kind, spec, host) = parse_argv(&argv)?;
+            Some(Running {
+                pid: process.pid().as_u32(),
+                kind,
+                spec,
+                host,
+            })
+        })
+        .collect()
 }
 
 /// What one tunnel process has been doing, as opposed to what it is.
@@ -123,13 +171,17 @@ pub fn scan() -> Vec<Running> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     pub uptime: Duration,
-    /// Bytes the process has read.
+    /// Bytes the process has read, where that can be counted at all.
     ///
     /// A forwarder reads each payload byte once on its way in and writes it once
     /// on its way out, in both directions, so `rchar` alone already tracks
     /// everything through the tunnel -- adding `wchar` counts the same bytes
     /// twice and silently doubles every rate on screen.
-    pub read: u64,
+    ///
+    /// `None` off Linux, and it has to stay `None` all the way to the screen: a
+    /// stand-in of `0` would come back out of the delta as a rate of `Some(0.0)`
+    /// and print `0B/s`, which is the reading for a live tunnel nobody is using.
+    pub read: Option<u64>,
 }
 
 /// Measure a process that has *already* been confirmed to be the tunnel's.
@@ -138,19 +190,37 @@ pub fn usage(pid: u32) -> Option<Usage> {
     let process = procfs::process::Process::new(i32::try_from(pid).ok()?).ok()?;
     let started = procfs::boot_time_secs().ok()?
         + process.stat().ok()?.starttime / procfs::ticks_per_second();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     Some(Usage {
         uptime: Duration::from_secs(now.saturating_sub(started)),
-        read: process.io().ok()?.rchar,
+        read: Some(process.io().ok()?.rchar),
     })
 }
 
+/// Uptime carries over; the byte counter does not. `/proc/<pid>/io` has no
+/// macOS counterpart that counts socket traffic -- `proc_pid_rusage` counts
+/// disk -- so the traffic column stays blank rather than showing a number that
+/// measures something else.
+///
+/// This is also why uptime is the column drawn first: on macOS it is the only
+/// one left.
 #[cfg(not(target_os = "linux"))]
-pub fn usage(_pid: u32) -> Option<Usage> {
-    None
+pub fn usage(pid: u32) -> Option<Usage> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let target = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[target]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let started = system.process(target)?.start_time();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(Usage {
+        uptime: Duration::from_secs(now.saturating_sub(started)),
+        read: None,
+    })
 }
 
 /// The process serving `forward`, if one is up.
@@ -288,6 +358,20 @@ mod tests {
     #[test]
     fn a_flag_with_no_value_at_the_end_is_not_a_tunnel() {
         assert_eq!(parse_argv(&argv("ssh -N kami -L")), None);
+    }
+
+    #[test]
+    fn the_portable_scanner_agrees_with_the_one_this_platform_uses() {
+        // What this really buys on Linux is that the macOS path is compiled and
+        // run at all -- most of the time both sides are empty, and the sameness
+        // only gets tested when a tunnel happens to be up. Discovering that the
+        // portable scanner does not build is worth much more on this machine
+        // than on the Mac where it would otherwise happen first.
+        let mut mine = scan();
+        let mut portable = scan_portable();
+        mine.sort_by_key(|r| r.pid);
+        portable.sort_by_key(|r| r.pid);
+        assert_eq!(mine, portable);
     }
 
     #[test]

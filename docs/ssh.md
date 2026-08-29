@@ -174,7 +174,9 @@ excalibur/src/modules/ssh/
 ```
 
 依赖:`tui-textarea = { version = "0.7", features = ["search"] }`
-(已验证与 ratatui 0.29 + crossterm 0.28 兼容)。
+(已验证与 ratatui 0.29 + crossterm 0.28 兼容);
+`sysinfo = { version = "0.38", default-features = false, features = ["system"] }`
+(只在非 Linux 平台与测试里用,见 §12)。
 
 CLI:`ex ssh` / 简写 `ex t`。
 
@@ -618,5 +620,74 @@ A3 的作用域是隐式模态(靠底栏文案兜)。
 - **`-R` 的第二盏灯恒为 `-`**:端口开在对端,本机无法观测。能测的是出口
   (要暴露的服务在本机活着没有),已如此实现。
 - `-R` 还需要远端 sshd `GatewayPorts yes` 才能被第三台机器访问,探测详情已提示。
-- 三层灯的 ② 只按端口匹配 `/proc/net/tcp`,不区分绑定地址。
-- 非 Linux 平台 `supervisor::scan()` 返回空,仪表盘全显示 stopped 而不是构建失败。
+- 三层灯的 ② 只按端口匹配监听表,不区分绑定地址。
+- macOS 上没有每隧道流量速率,只有运行时长(§12)。
+
+## 12. macOS 落地(2026-08-29)
+
+原先「非 Linux 平台 `scan()` 返回空」听起来像降级,实际是**把仪表盘整个关掉**:
+`scan()` 是唯一的闸门,它一空,`pid_at()` 恒为 `None` → 三层灯恒 `o o o`、
+`request_probe()` 过滤后为空(第三层探测本身跨平台可用,却根本不跑)、
+`sample_meters()` 无输入、无主隧道恒空、`Enter`/`s`/`S`/`A` **停不掉任何东西**。
+`a` 起隧道会真成功但界面一动不动,再按一次撞 `ExitOnForwardFailure` 报端口占用。
+
+模块的另一半本来就是好的:config 解析/表单/diff/原子写、`ssh -G` 校验、tunnels
+编辑、流向图。所以要补的只有三个函数。
+
+### 三个函数,各自的等价物
+
+| | Linux | macOS |
+|---|---|---|
+| `supervisor::scan` | `procfs` | `scan_portable`,走 `sysinfo` |
+| `supervisor::usage` | 运行时长 + `rchar` | 只有运行时长,`read: None` |
+| `probe::listening` | `/proc/net/tcp` | `netstat -an -p tcp` |
+
+`parse_argv`、`find`、`start`、`stop`、第三层探测、以及全部 UI 与文件逻辑
+一行没动 —— 8000 行里绝大部分本来就与平台无关。
+
+### 原计划是「用 sysinfo 统一两边,删掉 cfg 分支」,实测否掉了
+
+在 642 个进程的本机上量了一轮:
+
+| 做法 | 单次耗时 |
+|---|---|
+| `procfs` 遍历 | ~5.5ms |
+| `sysinfo` 每次新建 `System` | 85ms(首次 170ms) |
+| `sysinfo` 复用 `System` + `OnlyIfNotSet` | 45ms |
+
+`scan()` 每秒跑一次,**而且在渲染线程上**(`poll_tunnels` ← `update()`)。
+45~85ms 意味着每秒丢 1.5~2.5 帧、输入延迟尖峰到 85ms —— 代价落在这个模块
+唯一的卖点(「界面是活的」)上。于是 Linux 保留自己的实现,统一是假的省事。
+
+`sysinfo` 顺带把 `processes()` 里的**线程也算进来**(2244 vs 644),这也是它慢的
+一部分原因。
+
+### 不能在 Mac 上第一次编译
+
+本机没有 darwin target(nix 提供的 rust,无 rustup),所以 macOS 分支拿了两道保险:
+
+1. **`cfg(any(<对面平台>, test))`** —— `scan_portable`、`listens_in_netstat`
+   在 Linux 的 `cargo test` 里照样编译并运行;`listens_on` 反向同理。
+   `the_portable_scanner_agrees_with_the_one_this_platform_uses` 跑两个扫描器对结果。
+   实测:挂一条真隧道时两边都返回同一条 `Running { pid, kind, spec, host }`。
+2. **临时对调 `linux`/`macos` 两个 cfg token 再整体构建** —— 这样 Linux 上编译的
+   正是 Mac 会编译的那几段。零警告通过(包括两个 parser 在各自平台的 dead_code)。
+
+第 2 条是一次性动作,不留在仓库里;第 1 条是常设的。
+
+### 几个静默的点
+
+- **`Usage::read` 必须是 `Option<u64>`,不能拿 `0` 顶。** 顶了的话两次采样相减得
+  `Some(0.0)`,屏幕上印 `0B/s` —— 而那是「隧道通着、没人用」的读数(B2 特意分开的
+  两个状态)。`None` 印 `-`。顺带兑现了 B2 里「运行时长排在速率前面」的那个理由:
+  macOS 上只剩这一列。
+- **`Tunnels::path()` 不能用 `dirs::config_dir()`。** 它在 macOS 上是
+  `~/Library/Application Support`,规则会存到本文与其他机器都不指的地方。改成
+  `$XDG_CONFIG_HOME` 缺省 `~/.config`,Linux 上取值不变。
+- **`d` 远端发现:改命令必须同时改 parser。** 远端是 macOS 时 `ss` 不存在、BSD
+  netstat 不吃 `-tln`,所以加了第三档 `netstat -an -p tcp`。但它与前两者有两处不同,
+  漏掉任一处**返回空列表而不报错**:
+  - 地址分隔符是 `.` 不是 `:`(`::1.6022`)—— 先试 `:`,端口 parse 不出来再退到 `.`;
+  - `-an` 列出**全部连接**而不只监听 —— 不按 state 列过滤的话,每条出站连接的
+    对端端口都会被当成「可以转发的服务」列出来。
+- **`kill` / `ssh -f -N` / `ssh -G` 在 macOS 上原样可用**,没有做任何适配。

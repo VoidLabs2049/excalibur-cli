@@ -37,7 +37,7 @@ protocol (exit 0 → insert into the command line, exit 10 → insert and execut
 `exh` (bound to Ctrl+R) is a thin alias over it, so a new module needs no new
 fish function.
 
-`proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux. `ssh` also reads `/proc`, but only `supervisor::scan()` is cfg-gated: elsewhere it returns an empty list, so the module still builds and shows every tunnel as stopped.
+`proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux. `ssh` runs on Linux **and macOS**: `supervisor::scan`/`usage` and `probe::listening` each have two implementations, and the macOS pair is compiled on Linux too (under `cfg(any(…, test))`) so it cannot rot unnoticed on a machine nobody builds on. The only capability that does not carry over is the per-tunnel traffic rate. See `.claude/rules/ssh.md` for what differs and why.
 
 ## Modules
 

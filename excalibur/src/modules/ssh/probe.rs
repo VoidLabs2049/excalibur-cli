@@ -204,7 +204,22 @@ pub fn listening(port: u16) -> Option<bool> {
     readable.then_some(false)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS has no `/proc/net/tcp`. `netstat` is in the base system and needs no
+/// privileges to list sockets it does not own, which `lsof` does.
+#[cfg(target_os = "macos")]
+pub fn listening(port: u16) -> Option<bool> {
+    let output = std::process::Command::new("netstat")
+        .args(["-an", "-p", "tcp"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| listens_in_netstat(&String::from_utf8_lossy(&output.stdout), port))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn listening(_port: u16) -> Option<bool> {
     None
 }
@@ -215,6 +230,11 @@ pub fn listening(_port: u16) -> Option<bool> {
 /// Matched on the port alone, not the address: a tunnel binds loopback and v6
 /// separately, and `ExitOnForwardFailure` means a live ssh really does own the
 /// port it asked for.
+///
+/// Cfg'd for the same reason as [`listens_in_netstat`], the other way round:
+/// each parser is dead code on the platform that does not use it, and the tests
+/// for both should run wherever they are built.
+#[cfg(any(target_os = "linux", test))]
 fn listens_on(line: &str, port: u16) -> bool {
     let mut fields = line.split_whitespace().skip(1);
     let Some(local) = fields.next() else {
@@ -228,6 +248,29 @@ fn listens_on(line: &str, port: u16) -> bool {
         .next()
         .and_then(|hex| u16::from_str_radix(hex, 16).ok())
         == Some(port)
+}
+
+/// Whether a BSD `netstat -an -p tcp` listing has `port` in LISTEN.
+///
+/// Two things differ from the Linux side and both fail silently if missed: the
+/// address separator is `.`, not `:`, and this listing includes every
+/// connection rather than only listeners, so an established connection to the
+/// same port would otherwise read as a bound one.
+///
+/// Compiled on Linux only for its test -- the parsing is the part that can be
+/// wrong, and it should not need a Mac to find that out.
+#[cfg(any(target_os = "macos", test))]
+fn listens_in_netstat(text: &str, port: u16) -> bool {
+    text.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.first().is_some_and(|proto| proto.starts_with("tcp"))
+            && fields.last() == Some(&"LISTEN")
+            && fields
+                .get(3)
+                .and_then(|local| local.rsplit_once('.'))
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                == Some(port)
+    })
 }
 
 #[cfg(test)]
@@ -259,6 +302,41 @@ mod tests {
         let row = "  20: 0100007F:9C3B 0100007F:1234 01 00000000:00000000 \
                    00:00000000 00000000  1002        0 8910121 1";
         assert!(!listens_on(row, 39995));
+    }
+
+    /// Real `netstat -an -p tcp` output from macOS, with a tunnel on 6022 bound
+    /// on both families and an established connection to 443.
+    const NETSTAT: &str = "\
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
+tcp4       0      0  127.0.0.1.6022         *.*                    LISTEN
+tcp6       0      0  ::1.6022               *.*                    LISTEN
+tcp46      0      0  *.22                   *.*                    LISTEN
+tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
+";
+
+    #[test]
+    fn a_bsd_listen_row_is_recognised_through_its_dotted_port() {
+        assert!(listens_in_netstat(NETSTAT, 6022));
+        assert!(
+            listens_in_netstat(NETSTAT, 22),
+            "the wildcard row was missed"
+        );
+        assert!(!listens_in_netstat(NETSTAT, 60), "matched a partial port");
+    }
+
+    #[test]
+    fn a_bsd_established_row_is_not_a_listener() {
+        // `netstat -an` lists every connection, not only listeners. Without the
+        // state column the far port of this row reports 443 as bound here.
+        assert!(!listens_in_netstat(NETSTAT, 443));
+        assert!(!listens_in_netstat(NETSTAT, 52134));
+    }
+
+    #[test]
+    fn bsd_headers_are_not_listeners() {
+        assert!(!listens_in_netstat(NETSTAT, 0));
+        assert!(!listens_in_netstat("", 6022));
     }
 
     #[test]

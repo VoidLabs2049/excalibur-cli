@@ -217,8 +217,19 @@ pub struct Tunnels {
 }
 
 impl Tunnels {
+    /// `$XDG_CONFIG_HOME/excalibur/tunnels.yaml`, defaulting to `~/.config`.
+    ///
+    /// Deliberately not `dirs::config_dir()`: on macOS that resolves to
+    /// `~/Library/Application Support`, so the same tool would keep its rules
+    /// somewhere else than every doc and every other machine says.
     pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("excalibur").join("tunnels.yaml"))
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            // The spec says a relative value is to be ignored, and honouring one
+            // would write the rules into whatever the cwd happened to be.
+            .filter(|base| base.is_absolute())
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+            .map(|base| base.join("excalibur").join("tunnels.yaml"))
     }
 
     /// A missing file is an empty set of profiles, not an error.

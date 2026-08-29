@@ -24,7 +24,12 @@ pub struct Listener {
 /// syntax differs enough that shell one-liners are a standing trap
 /// (see ~/.claude/remote-ops.md). `sh -c '<one argument>'` parses identically
 /// in both.
-const REMOTE: &str = "sh -c 'ss -tlnH 2>/dev/null || netstat -tln'";
+///
+/// The third form is for a BSD host (macOS): `ss` is absent there and BSD
+/// netstat takes neither `-t` nor `-l`. It prints a different listing, which
+/// [`parse`] has to tell apart -- see there.
+const REMOTE: &str =
+    "sh -c 'ss -tlnH 2>/dev/null || netstat -tln 2>/dev/null || netstat -an -p tcp'";
 
 pub fn listeners(host: &str) -> Result<Vec<Listener>> {
     let output = Command::new("ssh")
@@ -48,11 +53,16 @@ pub fn listeners(host: &str) -> Result<Vec<Listener>> {
     Ok(parse(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Pull the listening ports out of either tool's output.
+/// Pull the listening ports out of any of the three tools' output.
 ///
-/// Both put the local address in the fourth column, so the difference is only
-/// which lines count: `ss -tlnH` emits `LISTEN ...` with no header, `netstat`
-/// emits two header lines and rows starting `tcp`/`tcp6`.
+/// All of them put the local address in the fourth column, so the difference is
+/// which lines count: `ss -tlnH` emits `LISTEN ...` with no header, GNU
+/// `netstat -tln` emits two header lines and rows starting `tcp`/`tcp6`, and
+/// BSD `netstat -an -p tcp` starts its rows `tcp4`/`tcp6`/`tcp46`.
+///
+/// **BSD rows have to be filtered by the state column.** `-an` lists every
+/// connection, not only listeners; without that check the far port of every
+/// outbound connection is offered as a port to forward.
 ///
 /// Ports are merged across address families -- `127.0.0.1:631` and `[::1]:631`
 /// are one service, and listing them twice would have you forward the same
@@ -64,17 +74,18 @@ pub fn parse(text: &str) -> Vec<Listener> {
         let Some(first) = fields.first() else {
             continue;
         };
-        if !matches!(*first, "LISTEN" | "tcp" | "tcp6") {
+        let listening = match *first {
+            "LISTEN" => true,
+            proto if proto.starts_with("tcp") => fields.last() == Some(&"LISTEN"),
+            _ => false,
+        };
+        if !listening {
             continue;
         }
         let Some(local) = fields.get(3) else { continue };
-        let Some((address, port)) = local.rsplit_once(':') else {
+        let Some((address, port)) = split_endpoint(local) else {
             continue;
         };
-        let Ok(port) = port.parse::<u16>() else {
-            continue;
-        };
-        let address = address.trim_matches(['[', ']']).to_string();
 
         let entry = found.entry(port).or_insert((Vec::new(), true));
         // One non-loopback binding is enough to make the port directly
@@ -97,6 +108,23 @@ pub fn parse(text: &str) -> Vec<Listener> {
     // way, and on this author's machines they are ten of every twelve.
     listeners.sort_by_key(|l| (!l.loopback, l.port));
     listeners
+}
+
+/// The address and port of `127.0.0.1:8080`, `[::1]:631` or, from BSD netstat,
+/// `127.0.0.1.6022`.
+///
+/// The colon is tried first and rejected on the port not parsing, which is what
+/// keeps `::1.6022` from splitting into `::` and `1.6022`.
+fn split_endpoint(local: &str) -> Option<(String, u16)> {
+    for separator in [':', '.'] {
+        let Some((address, port)) = local.rsplit_once(separator) else {
+            continue;
+        };
+        if let Ok(port) = port.parse::<u16>() {
+            return Some((address.trim_matches(['[', ']']).to_string(), port));
+        }
+    }
+    None
 }
 
 fn is_loopback(address: &str) -> bool {
@@ -162,6 +190,44 @@ tcp6       0      0 ::1:631                 :::*                    LISTEN
         assert_eq!(ports, [631, 8080, 22]);
         assert!(found[0].loopback && found[1].loopback);
         assert!(!found[2].loopback);
+    }
+
+    /// BSD `netstat -an -p tcp`, the third fallback: dotted ports, `tcp4`/`tcp46`
+    /// protocols, and rows that are not listeners at all.
+    const BSD: &str = "\
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
+tcp4       0      0  127.0.0.1.8080         *.*                    LISTEN
+tcp46      0      0  *.80                   *.*                    LISTEN
+tcp6       0      0  ::1.631                *.*                    LISTEN
+tcp4       0      0  127.0.0.1.631          *.*                    LISTEN
+tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
+";
+
+    #[test]
+    fn bsd_netstat_output_parses_the_same_way() {
+        // Same shape as SS: 631 on both families, 80 public, 8080 loopback.
+        let found = parse(BSD);
+        let ports: Vec<u16> = found.iter().map(|l| l.port).collect();
+        assert_eq!(ports, [631, 8080, 80]);
+        assert!(
+            found[0].address.contains("::1"),
+            "got: {}",
+            found[0].address
+        );
+        assert!(!found[2].loopback, "the wildcard row read as loopback");
+    }
+
+    #[test]
+    fn a_bsd_connection_does_not_become_a_forwardable_port() {
+        // `-an` lists everything. 443 is what this machine is *talking to*;
+        // offering it as a port to forward would be an invented service.
+        let ports: Vec<u16> = parse(BSD).iter().map(|l| l.port).collect();
+        assert!(
+            !ports.contains(&443),
+            "an outbound connection became a port"
+        );
+        assert!(!ports.contains(&52134));
     }
 
     #[test]

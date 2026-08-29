@@ -1640,7 +1640,7 @@ mod tests {
         state::Meter {
             usage: supervisor::Usage {
                 uptime: std::time::Duration::from_secs(uptime_secs),
-                read: 0,
+                read: Some(0),
             },
             rate,
             at: std::time::Instant::now(),

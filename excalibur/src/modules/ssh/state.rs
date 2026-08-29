@@ -999,9 +999,10 @@ impl SshState {
                 continue;
             };
             // A pid reused by a different process would show as a huge negative
-            // delta; `checked_sub` drops it rather than inventing a rate.
+            // delta; `checked_sub` drops it rather than inventing a rate. A
+            // platform with no byte counter drops out here for the same reason.
             let rate = self.meters.get(&process.pid).and_then(|last| {
-                let bytes = usage.read.checked_sub(last.usage.read)?;
+                let bytes = usage.read?.checked_sub(last.usage.read?)?;
                 let elapsed = now.duration_since(last.at).as_secs_f64();
                 (elapsed > 0.0).then(|| bytes as f64 / elapsed)
             });

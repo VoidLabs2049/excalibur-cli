@@ -36,9 +36,9 @@ CLI: `cargo run -- ssh`, alias `t`.
 | `form.rs` | Six-field `HostForm`/`ForwardForm`, `BlockEdit` raw-text; `plan()` → line diff; `write_config()` |
 | `tunnels.rs` | `Tunnels`/`Profile`/`Forward` serde over `~/.config/excalibur/tunnels.yaml`; rule validation |
 | `supervisor.rs` | `parse_argv` / `scan` / `find` / `start` / `stop` |
-| `probe.rs` | `Health` — the three lights; `/proc/net/tcp` listen check and end-to-end connect |
+| `probe.rs` | `Health` — the three lights; the listen check (`/proc/net/tcp` or `netstat`) and end-to-end connect |
 | `worker.rs` | `Job`/`Outcome` channels so blocking work stays off the render thread |
-| `discover.rs` | `ss -tlnH` / `netstat -tln` over ssh, parsed into `Listener`s |
+| `discover.rs` | `ss -tlnH` / GNU `netstat -tln` / BSD `netstat -an -p tcp` over ssh, parsed into `Listener`s |
 
 ## Screens
 
@@ -60,6 +60,39 @@ The cursor starts on `Dashboard`, not the top entry — it is the high-frequency
 
 The third layer works because `-L` is lazy: ssh only dials the remote after a
 local `accept`, so a failed remote closes the connection immediately.
+
+## Platforms
+
+Linux and macOS. Three functions have two implementations; everything else —
+`parse_argv`, `find`, `start`, `stop`, the end-to-end probe, and every screen —
+is platform-independent.
+
+| | Linux | macOS |
+|---|---|---|
+| `supervisor::scan` | `procfs` | `scan_portable`, via `sysinfo` |
+| `supervisor::usage` | uptime + `rchar` | uptime only, `read: None` |
+| `probe::listening` | `/proc/net/tcp` | `netstat -an -p tcp` |
+
+- **`scan()` keeps a separate Linux implementation for speed, not portability.**
+  It runs once a second on the render thread; over ~650 processes `procfs` costs
+  ~5ms and `sysinfo` 45–85ms. The slow one would drop frames every second on the
+  one screen whose value is that it stays live. Do not "simplify" the two into
+  one without re-measuring.
+- **The macOS halves are compiled on Linux too** — `scan_portable` and
+  `listens_in_netstat` are `#[cfg(any(<their platform>, test))]`, and
+  `listens_on` is cfg'd the same way in reverse. Without that, a change here
+  first fails to build on a Mac, which is the worst place to find out.
+  `the_portable_scanner_agrees_with_the_one_this_platform_uses` then runs both
+  scanners and compares; when a tunnel is up that is a real cross-check, and
+  when none is it still proves the thing builds and does not panic.
+- **The traffic rate is Linux-only, and must read as absent rather than zero.**
+  `Usage::read` is `Option<u64>` for that reason: a stand-in `0` would come back
+  out of the delta as `Some(0.0)` and print `0B/s`, which is the reading for a
+  live tunnel nobody is using. Uptime is drawn before the rate, so the column
+  macOS keeps is the one that survives a narrow terminal.
+- **`Tunnels::path()` is `$XDG_CONFIG_HOME`-or-`~/.config`, not
+  `dirs::config_dir()`.** The latter is `~/Library/Application Support` on
+  macOS, which would put the rules somewhere other than every doc says.
 
 ## Gotchas
 
@@ -90,11 +123,9 @@ different outcome.
   not observable from here; what is checked instead is the exit — whether the
   service being exposed is alive locally.
 - **`probe::listening` matches by port only**, ignoring the bind address.
-- **`supervisor::scan()` returns `Vec::new()` off Linux** (it reads `/proc`), so
-  the dashboard shows everything as stopped rather than failing to build. Unlike
-  proctrace, the module itself is *not* cfg-gated. It also filters to our own
-  uid — `/proc/<pid>/cmdline` is world-readable, so without that another user's
-  tunnel is listed as unclaimed and offered for a `kill` that can only fail.
+- **`scan()` filters to our own uid.** argv is world-readable, so without that
+  another user's tunnel is listed as unclaimed and offered for a `kill` that can
+  only fail. Both implementations have to keep doing it.
 - **`Slot` is `(profile_index, forward_index)`** — a position, not an identity.
   Anything cached on it must be dropped when the file reloads.
 - **The dashboard cursor runs past the last rule.** `forward_index` indexes
@@ -112,6 +143,8 @@ different outcome.
 - **`usage()` reads `rchar`, not `rchar + wchar`.** A forwarder reads each
   payload byte once and writes it once, so `rchar` alone already covers the
   traffic; adding `wchar` counts the same bytes twice and doubles every rate.
+  There is no macOS equivalent that counts socket traffic — `proc_pid_rusage`
+  counts disk — so the field is `Option` and stays `None` there.
 - **`sample_meters()` may only read pids that came out of `scan()`.** Identity
   by argv first, measurement second — otherwise the numbers describe a process
   that was never the one meant, and nothing about them looks wrong.
@@ -120,6 +153,13 @@ different outcome.
   answer whose host is not the open one. The remote command is wrapped in
   `sh -c '...'` because the login shell over there is fish, where a bare
   `a || b` is a standing trap (`~/.claude/remote-ops.md`).
+- **`discover::parse` must filter BSD rows by the state column.** The macOS
+  fallback is `netstat -an -p tcp`, which lists *every* connection rather than
+  only listeners; without the check, the far port of each outbound connection is
+  offered as a port to forward. Its addresses are also dotted (`::1.6022`), so
+  `split_endpoint` tries `:` first and falls back to `.` only when the port
+  fails to parse. Change the remote command and this parser together — a
+  mismatch returns an empty list, not an error.
 - **`exits_on(host)` filters by host.** kami's 8080 and thor's 8080 are
   different services; a bare port match reports one as already forwarded when
   nothing forwards it.
@@ -176,7 +216,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-169 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+175 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.
