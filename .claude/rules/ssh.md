@@ -29,10 +29,10 @@ CLI: `cargo run -- ssh`, alias `t` (`s` was taken by settings).
 |------|------|
 | `mod.rs` | `SshModule` — implements `Module`, routes keys per `Screen` |
 | `state.rs` | `SshState`, `Screen`, the landing `MENU`; polling timers, start/stop, health cache |
-| `ui.rs` | Renders all four screens |
+| `ui.rs` | Renders all five screens |
 | `sshconfig.rs` | Parses `~/.ssh/config` into `HostBlock { patterns, start, end, directives, shadowed_by }` |
-| `effective.rs` | Runs `ssh -G <alias>` and diffs it against what the block says |
-| `form.rs` | Six-field `HostForm` and `ForwardForm`; `plan()` → line diff; `write_config()` |
+| `effective.rs` | `resolve()` diffs a block against `ssh -G`; `check()` gates every save |
+| `form.rs` | Six-field `HostForm`/`ForwardForm`, `BlockEdit` raw-text; `plan()` → line diff; `write_config()` |
 | `tunnels.rs` | `Tunnels`/`Profile`/`Forward` serde over `~/.config/excalibur/tunnels.yaml`; rule validation |
 | `supervisor.rs` | `parse_argv` / `scan` / `find` / `start` / `stop` |
 | `probe.rs` | `Health` — the three lights; `/proc/net/tcp` listen check and end-to-end connect |
@@ -127,6 +127,10 @@ different outcome.
   "self" from candidate lists. A new alias that duplicates an existing one is
   refused at save: OpenSSH takes the first match, so the block would be written,
   appear in the list, and do nothing.
+- **`BlockEdit` holds its own `start`/`end`.** The config is reloaded after any
+  save, and a range re-derived afterwards would overwrite different lines.
+  While it is open every key belongs to the text — the host-list bindings must
+  not fire underneath it.
 - **A rate of `None` is not a rate of zero.** `None` is "no second sample yet";
   `Some(0.0)` is a live tunnel carrying nothing, which is the interesting one.
 - **`effective::check` runs before every config write** and returns three
@@ -171,7 +175,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-166 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+169 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.

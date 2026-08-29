@@ -84,6 +84,9 @@ impl SshModule {
             return Ok(ModuleAction::None);
         }
 
+        if self.state.block.is_some() {
+            return self.handle_block_key(key);
+        }
         if self.state.form.is_some() {
             return self.handle_form_key(key);
         }
@@ -132,12 +135,33 @@ impl SshModule {
                 self.state.clone_host();
                 Ok(ModuleAction::None)
             }
+            KeyCode::Tab => {
+                self.state.open_block_edit();
+                Ok(ModuleAction::None)
+            }
             KeyCode::Enter => {
                 self.state.open_form();
                 Ok(ModuleAction::None)
             }
             _ => Ok(ModuleAction::None),
         }
+    }
+
+    /// Free-text editing: every key belongs to the text except the two that get
+    /// out, so nothing else on this screen may fire while it is open.
+    fn handle_block_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+        match key.code {
+            KeyCode::Esc => self.state.block = None,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.save_block_edit()
+            }
+            _ => {
+                if let Some(block) = &mut self.state.block {
+                    block.area.input(key);
+                }
+            }
+        }
+        Ok(ModuleAction::None)
     }
 
     fn handle_form_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
@@ -1182,6 +1206,97 @@ mod tests {
             .plan(&module.state.config)
             .lines
             .join("\n")
+    }
+
+    #[test]
+    fn tab_opens_the_block_as_text_and_writes_back_only_its_lines() {
+        // The supplement to the form, for the three of thirty-five blocks its
+        // six fields cannot express. Only the block's range is loaded and only
+        // that range is written, so neighbours cannot be disturbed.
+        let before = "Host a\n  Port 22\n\nHost b\n  Port 23\n  ServerAliveInterval 30\n";
+        let mut module = on_config_screen(before);
+        press(&mut module, KeyCode::Char('j')); // onto `b`
+        press(&mut module, KeyCode::Tab);
+
+        let block = module.state.block.as_ref().expect("an editor opened");
+        assert_eq!(
+            block.area.lines(),
+            ["Host b", "  Port 23", "  ServerAliveInterval 30"],
+            "loaded something other than the block"
+        );
+        assert!(
+            rendered(&module).contains("ServerAliveInterval 30"),
+            "the block is not on screen"
+        );
+
+        // Typing lands in the text, not in the list's key bindings. The cursor
+        // opens at the end, so a new directive is Enter-then-type.
+        press(&mut module, KeyCode::Enter);
+        for c in "  ServerAliveCountMax 3".chars() {
+            press(&mut module, KeyCode::Char(c));
+        }
+        let plan = module
+            .state
+            .block
+            .as_ref()
+            .unwrap()
+            .plan(&module.state.config);
+        assert_eq!(
+            plan.lines[..3],
+            ["Host a", "  Port 22", ""],
+            "the neighbouring block moved"
+        );
+        assert!(plan.lines.iter().any(|l| l.contains("ServerAliveCountMax")));
+    }
+
+    #[test]
+    fn q_typed_into_the_block_editor_does_not_quit() {
+        // Every key belongs to the text while it is open; the list bindings must
+        // not fire underneath it.
+        let mut module = on_config_screen("Host a\n  Port 22\n");
+        press(&mut module, KeyCode::Tab);
+        assert_eq!(press(&mut module, KeyCode::Char('q')), ModuleAction::None);
+        assert!(module.state.block.is_some(), "the editor closed");
+        press(&mut module, KeyCode::Esc);
+        assert!(module.state.block.is_none(), "Esc did not get out");
+    }
+
+    #[test]
+    fn a_block_edit_openssh_would_refuse_never_reaches_the_file() {
+        // Free text is exactly where `ServerAliveCountMx` gets in, and ssh
+        // stops reading the file at that line.
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("excalibur-d3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let original = "Host a\n  Port 22\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut module = SshModule::new();
+        module.state.config = SshConfig::load_from(&path).unwrap();
+        module.state.apply_filters();
+        module.state.screen = Screen::Config;
+        press(&mut module, KeyCode::Tab);
+        press(&mut module, KeyCode::Enter);
+        for c in "  Frobnicate yes".chars() {
+            press(&mut module, KeyCode::Char(c));
+        }
+        module
+            .handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("Not saved"), "got: {message}");
+        assert_eq!(after, original, "the broken block was written anyway");
+        assert!(module.state.block.is_some(), "the text was thrown away");
     }
 
     #[test]

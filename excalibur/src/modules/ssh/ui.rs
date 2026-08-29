@@ -1,5 +1,5 @@
 use super::effective::Effective;
-use super::form::{Change, Editing, Field, ForwardField, ForwardForm, HostForm};
+use super::form::{BlockEdit, Change, Editing, Field, ForwardField, ForwardForm, HostForm};
 use super::probe::{Health, Light};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Meter, Screen, SshState};
@@ -57,6 +57,11 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
 
     let help = match state.screen {
         Screen::Menu => " j/k: navigate   Enter: open   q: back to main menu".to_string(),
+        // Every other key belongs to the text, so only the two ways out are
+        // worth listing.
+        Screen::Config if state.block.is_some() => {
+            " editing the block as text   Ctrl+S: save   Esc: cancel".to_string()
+        }
         Screen::Config if state.searching => {
             format!(
                 " /{}_   Enter: keep filter   Esc: clear",
@@ -91,7 +96,7 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             // advertises a key whose whole answer is "nothing to undo".
             let undo = if state.can_undo() { "   U: undo" } else { "" };
             format!(
-                " j/k: navigate   Enter: edit   n: new   c: clone   d: ports   g: ssh -G   /: search{undo}   Esc: back{filter}"
+                " j/k: navigate   Enter: edit   Tab: as text   n: new   c: clone   d: ports   g: ssh -G   /: search{undo}   Esc: back{filter}"
             )
         }
         Screen::Forward
@@ -353,11 +358,77 @@ fn dashboard_summary(state: &SshState) -> Vec<Line<'static>> {
 fn render_config(state: &SshState, area: Rect, buf: &mut Buffer) {
     let panes = split_panes(area);
     render_host_list(state, panes[0], buf);
+    if let Some(block) = &state.block {
+        return render_block_edit(state, block, panes[1], buf);
+    }
     match (&state.form, &state.effective) {
         (Some(form), _) => render_form(state, form, panes[1], buf),
         (None, Some((alias, resolved))) => render_effective(state, alias, resolved, panes[1], buf),
         (None, None) => render_host_preview(state, panes[1], buf),
     }
+}
+
+/// The selected block's own lines, editable, with the diff underneath.
+///
+/// Only these lines are loaded and only these are written back -- the same
+/// "touch nothing else" guarantee the form has. The diff is what shows that:
+/// a change outside the block would have nowhere to appear.
+fn render_block_edit(state: &SshState, block: &BlockEdit, area: Rect, buf: &mut Buffer) {
+    let outer = Block::bordered()
+        .title(format!(
+            " {}   lines {}-{} ",
+            block.alias,
+            block.start + 1,
+            block.end
+        ))
+        .border_type(BorderType::Rounded)
+        .style(Style::default().fg(Color::Cyan));
+    let inner = outer.inner(area);
+    outer.render(area, buf);
+
+    let rows = block.area.lines().len().max(1) as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(rows),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    Widget::render(&*block.area, chunks[0], buf);
+
+    let plan = block.plan(&state.config);
+    let mut lines: Vec<Line> = Vec::new();
+    if plan.changes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no changes",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  will write",
+            Style::default().fg(Color::Yellow),
+        )));
+        for change in &plan.changes {
+            match change {
+                Change::Replaced {
+                    line,
+                    before,
+                    after,
+                } => {
+                    lines.push(diff_line('-', line + 1, before, Color::Red));
+                    lines.push(diff_line('+', line + 1, after, Color::Green));
+                }
+                Change::Removed { line, before } => {
+                    lines.push(diff_line('-', line + 1, before, Color::Red))
+                }
+                Change::Inserted { line, after } => {
+                    lines.push(diff_line('+', line + 1, after, Color::Green))
+                }
+            }
+        }
+    }
+    Paragraph::new(lines).render(chunks[2], buf);
 }
 
 /// Compare what the block says against what `ssh -G` resolves. A directive can

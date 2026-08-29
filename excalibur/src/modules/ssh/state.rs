@@ -1,6 +1,6 @@
 use super::discover::Listener;
 use super::effective::{self, Effective};
-use super::form::{Field, ForwardForm, HostForm, write_config};
+use super::form::{BlockEdit, Field, ForwardForm, HostForm, write_config};
 use super::probe::Health;
 use super::sshconfig::{HostBlock, SshConfig};
 use super::supervisor::{self, Running, Usage};
@@ -115,6 +115,9 @@ pub struct SshState {
 
     /// The form for the selected host, replacing the preview pane while open.
     pub form: Option<HostForm>,
+    /// Free-text editing of the selected host's own lines, the supplement to
+    /// the form for the blocks its six fields cannot express.
+    pub block: Option<BlockEdit>,
     /// `ssh -G` output for an alias, shown instead of the raw block preview.
     pub effective: Option<(String, Effective)>,
     pub notification: Option<(String, Instant)>,
@@ -155,6 +158,7 @@ impl SshState {
             filtered_indices: Vec::new(),
             selected_index: 0,
             form: None,
+            block: None,
             effective: None,
             notification: None,
             tunnels: Tunnels::default(),
@@ -565,6 +569,51 @@ impl SshState {
     pub fn open_form(&mut self) {
         if let Some(&index) = self.filtered_indices.get(self.selected_index) {
             self.form = HostForm::new(&self.config, index);
+        }
+    }
+
+    /// Open the selected block's own lines for free-text editing.
+    pub fn open_block_edit(&mut self) {
+        let Some(&index) = self.filtered_indices.get(self.selected_index) else {
+            self.notify("No host selected");
+            return;
+        };
+        self.effective = None;
+        self.block = BlockEdit::new(&self.config, index);
+    }
+
+    /// Write the edited block back, through the same syntax check as the form.
+    ///
+    /// Free text is exactly where a misspelling like `ServerAliveCountMx` gets
+    /// in, and OpenSSH stops reading the file at that line -- so this is the
+    /// path that needs [`effective::check`] most.
+    pub fn save_block_edit(&mut self) {
+        let Some(block) = &self.block else { return };
+        let plan = block.plan(&self.config);
+        if plan.changes.is_empty() {
+            self.notify("No changes");
+            return;
+        }
+        let alias = block.alias.clone();
+        let caveat = match effective::check(&self.config, &plan.lines, &alias) {
+            effective::Verdict::Rejected(why) => {
+                self.notify(format!("Not saved -- ssh will not parse it: {why}"));
+                return;
+            }
+            effective::Verdict::Skipped(why) => format!("   (unchecked: {why})"),
+            effective::Verdict::Ok => String::new(),
+        };
+        match write_config(&self.config, &plan.lines) {
+            Ok(backup) => {
+                self.block = None;
+                self.load_config();
+                self.select_alias(&alias);
+                self.notify(format!(
+                    "Saved. U: undo the session. {} = before this save{caveat}",
+                    backup.display()
+                ));
+            }
+            Err(e) => self.notify(format!("Save failed: {e}")),
         }
     }
 

@@ -377,6 +377,73 @@ impl HostForm {
     }
 }
 
+/// Free-text editing of one host's own lines.
+///
+/// The supplement to the six-field form, for the three blocks out of thirty-five
+/// it cannot fully express. Only the selected block's line range is loaded and
+/// only that range is written back, so this is the same "touch nothing else"
+/// guarantee the form has, not a whole-file editor.
+#[derive(Debug)]
+pub struct BlockEdit {
+    pub alias: String,
+    /// The line range replaced on save. Held rather than re-derived because the
+    /// config underneath is reloaded after any save, and a stale range would
+    /// overwrite the wrong lines.
+    pub start: usize,
+    pub end: usize,
+    pub area: Box<TextArea<'static>>,
+}
+
+impl BlockEdit {
+    pub fn new(config: &SshConfig, host_index: usize) -> Option<Self> {
+        let host = config.hosts.get(host_index)?;
+        let mut area = TextArea::new(config.lines[host.start..host.end].to_vec());
+        // At the end, not the start: what brings anyone here is adding a
+        // directive the six fields do not model, and opening on the `Host` line
+        // means the first thing typed lands inside the alias.
+        area.move_cursor(tui_textarea::CursorMove::Bottom);
+        area.move_cursor(tui_textarea::CursorMove::End);
+        Some(BlockEdit {
+            alias: host.alias().to_string(),
+            start: host.start,
+            end: host.end,
+            area: Box::new(area),
+        })
+    }
+
+    /// The file with this block's lines swapped for the edited ones.
+    pub fn plan(&self, config: &SshConfig) -> Plan {
+        let mut lines = config.lines[..self.start].to_vec();
+        let edited: Vec<String> = self.area.lines().to_vec();
+        lines.extend(edited.iter().cloned());
+        lines.extend_from_slice(&config.lines[self.end.min(config.lines.len())..]);
+
+        let before = &config.lines[self.start..self.end];
+        let mut changes = Vec::new();
+        for (offset, after) in edited.iter().enumerate() {
+            match before.get(offset) {
+                Some(old) if old == after => {}
+                Some(old) => changes.push(Change::Replaced {
+                    line: self.start + offset,
+                    before: old.clone(),
+                    after: after.clone(),
+                }),
+                None => changes.push(Change::Inserted {
+                    line: self.start + offset,
+                    after: after.clone(),
+                }),
+            }
+        }
+        for (offset, old) in before.iter().enumerate().skip(edited.len()) {
+            changes.push(Change::Removed {
+                line: self.start + offset,
+                before: old.clone(),
+            });
+        }
+        Plan { lines, changes }
+    }
+}
+
 fn text_area(value: &str) -> TextArea<'static> {
     let mut area = TextArea::new(vec![value.to_string()]);
     area.move_cursor(tui_textarea::CursorMove::End);
