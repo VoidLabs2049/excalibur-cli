@@ -840,15 +840,7 @@ fn forward_explainer(forward: &Forward) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
-    let (listen, exit) = forward.explain();
-    lines.push(Line::from(Span::styled(
-        format!("  {listen}"),
-        Style::default().fg(Color::Green),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("  {exit}"),
-        Style::default().fg(Color::Yellow),
-    )));
+    lines.extend(flow_lines(forward));
 
     if forward.problem().is_none() {
         lines.push(Line::from(""));
@@ -935,7 +927,6 @@ fn render_forward_detail(state: &SshState, area: Rect, buf: &mut Buffer) {
         return;
     };
 
-    let (listen, exit) = forward.explain();
     let mut lines = vec![
         Line::from(vec![
             Span::raw("  direction   "),
@@ -945,16 +936,9 @@ fn render_forward_detail(state: &SshState, area: Rect, buf: &mut Buffer) {
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            format!("  {listen}"),
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            format!("  {exit}"),
-            Style::default().fg(Color::Yellow),
-        )),
-        Line::from(""),
     ];
+    lines.extend(flow_lines(forward));
+    lines.push(Line::from(""));
 
     if !forward.note.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1193,6 +1177,39 @@ fn profile_heading(state: &SshState, index: usize, name: &str, width: usize) -> 
             }),
         ),
     ]))
+}
+
+/// The path traffic takes, drawn top to bottom.
+///
+/// This replaced two lines of prose. The order of the three stops is exactly
+/// what `-L` and `-R` swap, and prose left the reader to assemble it; laid out
+/// vertically the swap is visible instead of stated.
+///
+/// Only `│` is used. `▼` and `→` are East-Asian-ambiguous width, so a terminal
+/// resolving them wide would shift every line after them out of the column.
+fn flow_lines(forward: &Forward) -> Vec<Line<'static>> {
+    let flow = forward.flow();
+    let label = Style::default().fg(Color::DarkGray);
+    vec![
+        Line::from(vec![
+            Span::styled("  in   ", label),
+            Span::styled(
+                format!("{:<16}", flow.enters_on),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(flow.port),
+        ]),
+        Line::from(Span::styled("       │  through ssh", label)),
+        Line::from(vec![
+            Span::styled("  hop  ", label),
+            Span::styled(flow.hop, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(Span::styled(format!("       │  {}", flow.resolves), label)),
+        Line::from(vec![
+            Span::styled("  out  ", label),
+            Span::styled(flow.leaves_at, Style::default().fg(Color::Yellow)),
+        ]),
+    ]
 }
 
 /// Heading for the processes no rule claims.

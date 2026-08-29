@@ -102,6 +102,10 @@ different outcome.
   start keys stay off orphans — that is deliberate, not an oversight.
 - **Orphans are `scan()` minus `find()`, never a pattern.** Anything broad
   enough to claim the rest also claims the process doing the claiming.
+- **The flow diagram uses `│` only.** `▼`/`→` are East-Asian-ambiguous width;
+  a terminal resolving them wide shifts every following line one column.
+  `Forward::flow()` decides who listens and who resolves the exit;
+  `ui::flow_lines()` only draws.
 
 ## Data flow
 
@@ -131,7 +135,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-135 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+137 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.

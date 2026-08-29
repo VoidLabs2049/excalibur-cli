@@ -198,7 +198,7 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ## 9. 待落地
 
-共 11 项(A 组与 C3 已完成)。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,
+共 11 项(A 组、B1、C3 已完成)。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,
 优先于其余。
 
 ### A · 转发组与多选
@@ -318,19 +318,28 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ### B · 可读性
 
-**B1 · 流向图形化** —— 详情面板现在是两行文字(`listen here / exit from kami`)。
-改成竖向流水图,把三段(入口 / 跳板 / 出口)画出来:
+~~**B1 · 流向图形化**~~ —— **2026-08-29 完成**(137 个测试)。详情面板原先是两行
+文字(`listen here / exit from kami`),改成竖向流水图:
 
 ```
-in   here             6022
-     │  through ssh
-hop  kami
-     │  kami connects to
-out  localhost:22   (= kami itself)
+  direction   local  (-L)          |   direction   remote  (-R)
+
+  in   here            6022        |   in   thor            8080
+       │  through ssh              |        │  through ssh
+  hop  kami                        |   hop  here
+       │  kami connects to         |        │  this machine connects to
+  out  localhost:22   (= kami …)   |   out  localhost:3000   (= this machine)
 ```
 
-`-R` 时第一段换成对端。**只用 ratatui 已在用的制表符**(`│`),
-不用 `▼`/`→` 这类东亚宽度歧义字符。
+三段的**顺序**正是 `-L` / `-R` 互换的东西,散文只能陈述,画出来才看得见。
+表单里也用同一份 —— 改方向时图跟着翻,那正是最容易填错的字段。
+
+实现分两半:`Forward::flow() -> Flow` 在 `tunnels.rs`(谁监听、谁解析出口),
+`ui::flow_lines()` 只负责画。原来的 `explain()` 已删除,它的四个测试全部迁到
+`flow()` 上,断言从「字符串包含」变成了字段相等。
+
+**只用 `│`**,不用 `▼`/`→` —— 这类字符是东亚歧义宽度,终端按宽字符解析的话,
+其后每一行都会错位一列。
 
 **B2 · 仪表盘统计** —— 每条:运行时长 + 吞吐速率;汇总:up / stopped / incomplete
 计数与总速率;选中项画 sparkline。数据源 `/proc/<pid>/stat` 的 starttime 与

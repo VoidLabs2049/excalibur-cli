@@ -1076,6 +1076,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_path_is_drawn_out_and_the_direction_swaps_its_ends() {
+        // Two lines of prose left the reader to work out which side listens and
+        // which resolves the exit. Drawing it is only worth the rows if -L and
+        // -R visibly differ, so both are checked.
+        let mut outward = forward("8080");
+        outward.kind = tunnels::Kind::Remote;
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("6022"), outward])]);
+        module.state.screen = Screen::Forward;
+
+        let out = rendered(&module);
+        assert!(out.contains("in   here"), "-L must open the port here");
+        assert!(out.contains("hop  nowhere"), "-L must hop to the far side");
+        assert!(
+            out.contains("nowhere connects to"),
+            "does not say whose view resolves the exit"
+        );
+        assert!(
+            out.contains("through ssh"),
+            "the two ends are not joined up"
+        );
+
+        press(&mut module, KeyCode::Char('j'));
+        let out = rendered(&module);
+        assert!(
+            out.contains("in   nowhere"),
+            "-R must open it on the far side"
+        );
+        assert!(out.contains("hop  here"));
+        assert!(out.contains("this machine connects to"));
+
+        // The form is where the direction is flipped, so it is where the
+        // diagram has to keep up.
+        press(&mut module, KeyCode::Enter);
+        assert!(
+            rendered(&module).contains("hop  here"),
+            "the form dropped the diagram"
+        );
+    }
+
     /// Above Linux's pid_max ceiling of 2^22, so a stop that reaches the worker
     /// cannot land on a real process.
     const NO_SUCH_PID: u32 = 40_000_000;

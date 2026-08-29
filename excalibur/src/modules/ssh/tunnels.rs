@@ -33,6 +33,23 @@ impl Kind {
     }
 }
 
+/// The path traffic takes through one forward, top to bottom.
+///
+/// Drawn rather than described because the order is exactly what `-L` and `-R`
+/// swap, and prose leaves the reader to assemble it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flow {
+    /// The machine the port opens on.
+    pub enters_on: String,
+    pub port: String,
+    /// The side that resolves the exit address, which is the far end of the ssh
+    /// connection from `enters_on`.
+    pub hop: String,
+    /// What the hop does next, named so it cannot be read as the other side.
+    pub resolves: String,
+    pub leaves_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Forward {
     /// An alias from `~/.ssh/config`.
@@ -81,22 +98,23 @@ impl Forward {
         format!("ssh {}", self.ssh_args().join(" "))
     }
 
-    /// Where the port opens and where traffic leaves, in that order.
+    /// The three stops traffic makes, in order.
     ///
     /// Both the side that listens and the side the exit is *resolved from* swap
     /// between `-L` and `-R`, and the second is the part the syntax hides: in
     /// `-L 29001:10.0.0.5:9001 kami` it is kami that connects to 10.0.0.5, so
     /// the exit may name anything kami can reach and nothing this machine can.
-    pub fn explain(&self) -> (String, String) {
-        match self.kind {
-            Kind::Local => (
-                format!("listen   here             {}", self.bind),
-                format!("exit     from {}   {}", self.host, self.annotated_target()),
-            ),
-            Kind::Remote => (
-                format!("listen   on {}      {}", self.host, self.bind),
-                format!("exit     from here       {}", self.annotated_target()),
-            ),
+    pub fn flow(&self) -> Flow {
+        let (enters_on, hop) = match self.kind {
+            Kind::Local => ("here".to_string(), self.host.clone()),
+            Kind::Remote => (self.host.clone(), "here".to_string()),
+        };
+        Flow {
+            enters_on,
+            port: self.bind.clone(),
+            hop,
+            resolves: format!("{} connects to", self.exit_resolved_from()),
+            leaves_at: self.annotated_target(),
         }
     }
 
@@ -287,15 +305,25 @@ mod tests {
         // -L opens the port here and the far side resolves the exit; -R is the
         // mirror. The second half is what the flag syntax hides: in
         // `-L 29001:10.0.0.5:9001 kami` it is kami that connects to 10.0.0.5.
-        let (listen, exit) = local().explain();
-        assert!(listen.contains("here"), "got: {listen}");
-        assert!(exit.contains("from xx-database-1"), "got: {exit}");
+        let flow = local().flow();
+        assert_eq!(flow.enters_on, "here");
+        assert_eq!(flow.hop, "xx-database-1");
+        assert_eq!(flow.resolves, "xx-database-1 connects to");
         assert_eq!(local().exit_resolved_from(), "xx-database-1");
 
-        let (listen, exit) = remote().explain();
-        assert!(listen.contains("on xx-database-1"), "got: {listen}");
-        assert!(exit.contains("from here"), "got: {exit}");
+        let flow = remote().flow();
+        assert_eq!(flow.enters_on, "xx-database-1");
+        assert_eq!(flow.hop, "here");
+        assert_eq!(flow.resolves, "this machine connects to");
         assert_eq!(remote().exit_resolved_from(), "this machine");
+    }
+
+    #[test]
+    fn the_flow_keeps_the_port_with_the_side_that_opens_it() {
+        // The bind belongs to `in`, never to the hop -- putting it anywhere else
+        // would read as "kami listens on 29001" for a -L rule.
+        assert_eq!(local().flow().port, "29001");
+        assert_eq!(remote().flow().port, "8080");
     }
 
     #[test]
@@ -476,19 +504,19 @@ mod whose_localhost {
     fn a_local_forward_says_localhost_means_the_far_side() {
         // `-L 6022:localhost:22 kami` lands on kami's sshd, not this machine's.
         // Reading the rule as "my localhost" is the usual mistake.
-        let (_, exit) = rule(Kind::Local, "localhost:22").explain();
+        let exit = rule(Kind::Local, "localhost:22").flow().leaves_at;
         assert!(exit.contains("= kami itself"), "got: {exit}");
     }
 
     #[test]
     fn a_remote_forward_says_localhost_means_this_machine() {
-        let (_, exit) = rule(Kind::Remote, "127.0.0.1:3000").explain();
+        let exit = rule(Kind::Remote, "127.0.0.1:3000").flow().leaves_at;
         assert!(exit.contains("= this machine"), "got: {exit}");
     }
 
     #[test]
     fn a_named_exit_host_needs_no_annotation() {
-        let (_, exit) = rule(Kind::Local, "10.0.0.5:9001").explain();
+        let exit = rule(Kind::Local, "10.0.0.5:9001").flow().leaves_at;
         assert!(!exit.contains("(="), "got: {exit}");
         assert!(exit.contains("10.0.0.5:9001"));
     }
