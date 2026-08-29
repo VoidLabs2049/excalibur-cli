@@ -560,6 +560,19 @@ mod tests {
         module.state.screen = Screen::Dashboard;
     }
 
+    fn with_profiles(module: &mut SshModule, profiles: Vec<(&str, Vec<tunnels::Forward>)>) {
+        module.state.tunnels = tunnels::Tunnels {
+            profiles: profiles
+                .into_iter()
+                .map(|(name, forwards)| tunnels::Profile {
+                    name: name.into(),
+                    forwards,
+                })
+                .collect(),
+        };
+        module.state.screen = Screen::Dashboard;
+    }
+
     fn forward(bind: &str) -> tunnels::Forward {
         tunnels::Forward {
             host: "nowhere".into(),
@@ -567,6 +580,13 @@ mod tests {
             bind: bind.into(),
             target: "127.0.0.1:1".into(),
             note: String::new(),
+        }
+    }
+
+    fn noted(bind: &str, note: &str) -> tunnels::Forward {
+        tunnels::Forward {
+            note: note.into(),
+            ..forward(bind)
         }
     }
 
@@ -638,6 +658,111 @@ mod tests {
         with_tunnels(&mut module, vec![forward("39001")]);
         let out = rendered(&module);
         assert!(out.contains("process / listening / path"));
+    }
+
+    #[test]
+    fn the_dashboard_groups_rules_under_their_profile_with_a_count() {
+        // Without the heading there is no way to tell which group a rule is in,
+        // and the whole point of a group is acting on it as one.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001")]),
+                ("lab", vec![forward("39002"), forward("39003")]),
+            ],
+        );
+        let out = rendered(&module);
+        assert!(out.contains("daily"), "missing the first heading");
+        assert!(out.contains("lab"), "missing the second heading");
+        assert!(out.contains("0/1 up"), "missing the first count");
+        assert!(out.contains("0/2 up"), "missing the second count");
+    }
+
+    #[test]
+    fn the_group_count_follows_the_processes_behind_its_rules() {
+        // A count that is always 0/n would render and pass every layout test
+        // while telling you nothing.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![forward("39001"), forward("39002")])],
+        );
+        let live = forward("39001");
+        module.state.running = vec![supervisor::Running {
+            pid: 4242,
+            kind: live.kind,
+            spec: live.spec(),
+            host: live.host.clone(),
+        }];
+        let out = rendered(&module);
+        assert!(out.contains("1/2 up"), "the count ignores live processes");
+        assert!(out.contains("pid 4242"), "the live rule is not marked");
+    }
+
+    #[test]
+    fn a_note_shows_under_its_rule_on_both_screens() {
+        // The summary line is all flags and ports; the note is the only part
+        // that says what the rule is for.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                (
+                    "daily",
+                    vec![noted("39001", "minio console"), forward("39002")],
+                ),
+                ("lab", vec![noted("39003", "grafana behind kami")]),
+            ],
+        );
+        assert!(
+            rendered(&module).contains("minio console"),
+            "note missing from the dashboard"
+        );
+
+        module.state.screen = Screen::Forward;
+        assert!(
+            rendered(&module).contains("minio console"),
+            "note missing from the forward list"
+        );
+    }
+
+    #[test]
+    fn a_rule_without_a_note_takes_one_row() {
+        // An empty note must not leave a blank line pushing the list apart.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![forward("39001"), forward("39002")])],
+        );
+        let area = Rect::new(0, 0, 160, 30);
+        let mut buf = Buffer::empty(area);
+        module.render(area, &mut buf);
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let first = rows.iter().position(|r| r.contains("39001")).unwrap();
+        let second = rows.iter().position(|r| r.contains("39002")).unwrap();
+        assert_eq!(second, first + 1, "a blank row crept in between the rules");
+    }
+
+    #[test]
+    fn the_forward_list_scrolls_to_the_selection() {
+        // Notes make every row twice as tall, so a plain List drops the
+        // highlight off the bottom far sooner than it used to.
+        let mut module = SshModule::new();
+        let rules: Vec<tunnels::Forward> = (0..20)
+            .map(|i| noted(&format!("39{i:03}"), "why this one exists"))
+            .collect();
+        with_profiles(&mut module, vec![("daily", rules)]);
+        module.state.screen = Screen::Forward;
+        for _ in 0..19 {
+            press(&mut module, KeyCode::Char('j'));
+        }
+        assert!(
+            rendered(&module).contains("39019"),
+            "the selected rule scrolled out of view"
+        );
     }
 
     #[test]

@@ -198,33 +198,40 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ## 9. 待落地
 
-共 11 项。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,优先于其余。
+共 11 项(A1 已完成)。分组内按顺序做,A / B 来自 2026-08-29 的使用反馈,优先于其余。
 
 ### A · 转发组与多选
 
-**A1 · 组要看得见**(只改 `ui.rs`,不动状态)
-
-仪表盘现在完全不显示组名(只有转发编辑页左栏显示)。
+~~**A1 · 组要看得见**~~ —— **2026-08-29 完成**(115 个测试)。
 
 ```
- daily                            2/3 up
-   * * *  -L 6022:localhost:22 kami      pid 41233
+ daily                                      2/3 up
+   * * *  -L 6022:localhost:22 kami         pid 41233
           SSH_kami
-   * * *  -L 6023:localhost:22 apollo    pid 41290
+   * * *  -L 6023:localhost:22 apollo       pid 41290
           SSH_apollo
-   o o o  -L 9001:10.0.0.5:9001 kami     stopped
+   o o o  -L 9001:10.0.0.5:9001 kami        stopped
           minio console
 ```
 
-- 组标题带 `n/m up`;光标所在组的标题反显,不移动光标也知道自己在哪组。
+- 组标题带 `n/m up`,颜色随状态(全起绿 / 全停灰 / 部分黄);光标所在组的标题变青,
+  不移动光标也知道自己在哪组。
 - 标题行**不可选中**,光标仍只走规则行,`forward_index` 语义不变。可选中的标题会
   牵动 `forward_next/previous`、`selected_forward`、`open_forward_form`、
   `delete_forward`、`selected_slot` 全部;而「对光标所在的组动手」本身没有歧义,
   不需要把标题变成一个可停靠的位置。
-- 同一处顺带落地:**左栏第二行 dim 显示 Note**。现在只有
-  `-L 6022:localhost:22 kami`,而备注往往是唯一说得清这条规则干嘛用的东西。
+- **Note 作为第二行 dim 显示**,仪表盘与转发编辑页都有。缩进随屏不同 ——
+  仪表盘要让开三盏灯(第 10 列),编辑页不用(第 5 列)。
+- 组计数与规则状态对齐在同一列(`STATUS_COLUMN = 44`),窄栏(转发页占 40%)
+  自动左移,否则会被整个裁掉。
 
-验证:两组三条规则,组计数与逐条 `pid_at` 一致;Note 为空时不留空行。
+**实现上比原计划多动了 `state.rs`**:`profile_status()` 与 `selected_profile()`
+要读 `running`,渲染层拿不到。
+
+**顺带修了一个既有隐患**:转发编辑页的左栏原本用无状态 `List`,选中项超出可视区
+就会静默消失。Note 让每行高度翻倍,把这个隐患变成了现实,所以两栏都改成
+`StatefulWidget` + `ListState`。标题与 Note 都占行,所以 item 下标不再等于规则
+下标 —— 选中项在构建列表时记录,而不是回算。
 
 **A2 · 组要能建**(`state.rs` + `mod.rs`)
 

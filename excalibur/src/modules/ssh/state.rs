@@ -553,6 +553,22 @@ impl SshState {
             .count()
     }
 
+    /// Live and total rule counts for one profile, for its heading.
+    pub fn profile_status(&self, profile: usize) -> (usize, usize) {
+        let Some(entry) = self.tunnels.profiles.get(profile) else {
+            return (0, 0);
+        };
+        let live = (0..entry.forwards.len())
+            .filter(|forward| self.pid_at((profile, *forward)).is_some())
+            .count();
+        (live, entry.forwards.len())
+    }
+
+    /// The profile the cursor currently sits in, so its heading can say so.
+    pub fn selected_profile(&self) -> Option<usize> {
+        self.selected_slot().map(|slot| slot.0)
+    }
+
     /// Names a rule in a message, so a failure says which one.
     fn describe(&self, slot: Slot) -> String {
         self.tunnels

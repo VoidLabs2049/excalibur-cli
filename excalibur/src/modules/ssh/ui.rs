@@ -834,15 +834,18 @@ fn render_forward_list(state: &SshState, area: Rect, buf: &mut Buffer) {
         return;
     }
 
+    // The block is applied by the List, so its inner width is two less than the pane.
+    let width = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_item = None;
     let mut row = 0;
-    for profile in &state.tunnels.profiles {
-        items.push(
-            ListItem::new(Line::from(format!(" {}", profile.name)))
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-        );
+    for (index, profile) in state.tunnels.profiles.iter().enumerate() {
+        items.push(profile_heading(state, index, &profile.name, width));
         for forward in &profile.forwards {
             let selected = row == state.forward_index;
+            if selected {
+                selected_item = Some(items.len());
+            }
             let style = if selected {
                 Style::default()
                     .fg(Color::Black)
@@ -851,7 +854,8 @@ fn render_forward_list(state: &SshState, area: Rect, buf: &mut Buffer) {
             } else {
                 Style::default()
             };
-            items.push(ListItem::new(Line::from(format!("   {}", forward.summary()))).style(style));
+            let summary = Line::from(format!("   {}", forward.summary()));
+            items.push(ListItem::new(rule_lines(summary, &forward.note, 5)).style(style));
             row += 1;
         }
     }
@@ -870,7 +874,11 @@ fn render_forward_list(state: &SshState, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    Widget::render(List::new(items).block(block), area, buf);
+    // Stateful so the selection scrolls into view: with notes the rows are twice
+    // as tall, so a plain List drops the highlight off the bottom much sooner.
+    let mut list_state = ListState::default();
+    list_state.select(selected_item);
+    StatefulWidget::render(List::new(items).block(block), area, buf, &mut list_state);
 }
 
 fn render_forward_detail(state: &SshState, area: Rect, buf: &mut Buffer) {
@@ -974,43 +982,58 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(inner);
 
+    // Rules are grouped under their profile, so the item index is no longer the
+    // rule index -- headings and notes both take rows. The selected item is
+    // recorded while building instead of being computed back out.
     let mut items: Vec<ListItem> = Vec::new();
-    for (row, slot) in state.tunnels.all().into_iter().enumerate() {
-        let Some(forward) = state.tunnels.get(slot.0, slot.1) else {
-            continue;
-        };
-        let health = state.health_at(slot);
-        let selected = row == state.forward_index;
-
-        let broken = forward.problem().is_some();
-        let mut line = vec![
-            Span::styled(
-                format!("  {}  ", health.lights()),
-                Style::default().fg(if broken {
-                    Color::Red
-                } else {
-                    light_colour(&health)
-                }),
-            ),
-            Span::raw(format!("{:<34}", truncate(&forward.summary(), 34))),
-        ];
-        line.push(match (broken, state.pid_at(slot)) {
-            (true, _) => Span::styled("incomplete", Style::default().fg(Color::Red)),
-            (false, Some(pid)) => {
-                Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray))
+    let mut selected_item = None;
+    let mut row = 0;
+    for (index, profile) in state.tunnels.profiles.iter().enumerate() {
+        items.push(profile_heading(
+            state,
+            index,
+            &profile.name,
+            chunks[0].width as usize,
+        ));
+        for (within, forward) in profile.forwards.iter().enumerate() {
+            let slot = (index, within);
+            let health = state.health_at(slot);
+            if row == state.forward_index {
+                selected_item = Some(items.len());
             }
-            (false, None) => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
-        });
 
-        let mut style = Style::default();
-        if selected {
-            style = style.add_modifier(Modifier::REVERSED);
+            let broken = forward.problem().is_some();
+            let mut line = vec![
+                Span::styled(
+                    format!("   {}  ", health.lights()),
+                    Style::default().fg(if broken {
+                        Color::Red
+                    } else {
+                        light_colour(&health)
+                    }),
+                ),
+                Span::raw(format!("{:<34}", truncate(&forward.summary(), 34))),
+            ];
+            line.push(match (broken, state.pid_at(slot)) {
+                (true, _) => Span::styled("incomplete", Style::default().fg(Color::Red)),
+                (false, Some(pid)) => {
+                    Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray))
+                }
+                (false, None) => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
+            });
+
+            let mut style = Style::default();
+            if row == state.forward_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            // 10 = 3 of indent, 5 of lights, 2 of gap.
+            items.push(ListItem::new(rule_lines(Line::from(line), &forward.note, 10)).style(style));
+            row += 1;
         }
-        items.push(ListItem::new(Line::from(line)).style(style));
     }
 
     let mut list_state = ListState::default();
-    list_state.select(Some(state.forward_index));
+    list_state.select(selected_item);
     StatefulWidget::render(List::new(items), chunks[0], buf, &mut list_state);
 
     // The legend earns its space: the three lights only mean anything if you
@@ -1041,6 +1064,63 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
     Paragraph::new(legend)
         .wrap(Wrap { trim: false })
         .render(chunks[1], buf);
+}
+
+/// Where a dashboard rule's own status starts: 3 of indent, 5 of lights, 2 of
+/// gap, 34 of summary.
+const STATUS_COLUMN: usize = 44;
+
+/// A profile heading with how many of its rules are up.
+///
+/// The heading is not selectable -- the cursor still walks rules only -- so the
+/// one the cursor sits under is highlighted instead, which is what says which
+/// group a group action would hit.
+///
+/// `width` is the pane's inner width. The count lines up with each rule's own
+/// status where there is room, and slides left where there is not -- the
+/// forward pane is 40% wide and would otherwise clip it away entirely.
+fn profile_heading(state: &SshState, index: usize, name: &str, width: usize) -> ListItem<'static> {
+    let (live, total) = state.profile_status(index);
+    let here = state.selected_profile() == Some(index);
+    let mut style = Style::default().add_modifier(Modifier::BOLD);
+    if here {
+        style = style.fg(Color::Cyan);
+    }
+    let count = format!("{live}/{total} up");
+    // Less one for the leading space, which is part of the same column budget.
+    let pad = (STATUS_COLUMN - 1).min(width.saturating_sub(count.chars().count() + 1));
+    ListItem::new(Line::from(vec![
+        Span::styled(format!(" {:<pad$}", truncate(name, pad)), style),
+        Span::styled(
+            count,
+            Style::default().fg(if live == total && total > 0 {
+                Color::Green
+            } else if live == 0 {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            }),
+        ),
+    ]))
+}
+
+/// The rule row, with its note underneath when it has one.
+///
+/// The note is usually the only thing that says what a rule is for, and the
+/// summary line has no room left for it. `indent` lines the note up with the
+/// start of the summary text, which differs by screen because the dashboard
+/// carries the three lights in front of it.
+fn rule_lines(summary: Line<'static>, note: &str, indent: usize) -> Vec<Line<'static>> {
+    if note.is_empty() {
+        return vec![summary];
+    }
+    vec![
+        summary,
+        Line::from(Span::styled(
+            format!("{:indent$}{note}", "", indent = indent),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
 }
 
 fn light_colour(health: &Health) -> Color {
