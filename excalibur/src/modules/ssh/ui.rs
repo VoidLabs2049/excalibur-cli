@@ -1,3 +1,4 @@
+use super::form::{Change, Editing, Field, HostForm};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Screen, SshState};
 use ratatui::{
@@ -39,10 +40,39 @@ pub fn render(state: &SshState, area: Rect, buf: &mut Buffer) {
 }
 
 fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
+    if let Some((message, _)) = &state.notification {
+        Paragraph::new(format!(" {message}"))
+            .block(Block::bordered().border_type(BorderType::Rounded))
+            .style(Style::default().fg(Color::Yellow))
+            .render(area, buf);
+        return;
+    }
+
     let help = match state.screen {
         Screen::Menu => " j/k: navigate   Enter: open   q: back to main menu".to_string(),
         Screen::Config if state.searching => {
-            format!(" /{}_   Enter: keep filter   Esc: clear", state.search_query)
+            format!(
+                " /{}_   Enter: keep filter   Esc: clear",
+                state.search_query
+            )
+        }
+        // The text box opens on the current value with the cursor at its end,
+        // so typing appends. Ctrl+U is what makes replacing it discoverable.
+        Screen::Config
+            if matches!(
+                state.form.as_ref().map(|f| &f.editing),
+                Some(Some(Editing::Text(_)))
+            ) =>
+        {
+            " Enter: accept   Ctrl+U: clear   Ctrl+W: delete word   Esc: cancel".to_string()
+        }
+        Screen::Config if state.form.is_some() => {
+            let read_only = if state.config.read_only {
+                "   [read-only: saving is refused]"
+            } else {
+                ""
+            };
+            format!(" j/k: field   Enter: edit   Ctrl+S: save   Esc: close{read_only}")
         }
         Screen::Config => {
             let filter = if state.search_query.is_empty() {
@@ -50,7 +80,7 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             } else {
                 format!("   filter: /{}", state.search_query)
             };
-            format!(" j/k: navigate   /: search   Esc: back   q: quit{filter}")
+            format!(" j/k: navigate   Enter: edit   /: search   Esc: back   q: quit{filter}")
         }
         _ => " Esc: back to SSH menu   q: back to main menu".to_string(),
     };
@@ -171,7 +201,177 @@ fn config_summary(state: &SshState) -> Vec<Line<'static>> {
 fn render_config(state: &SshState, area: Rect, buf: &mut Buffer) {
     let panes = split_panes(area);
     render_host_list(state, panes[0], buf);
-    render_host_preview(state, panes[1], buf);
+    match &state.form {
+        Some(form) => render_form(state, form, panes[1], buf),
+        None => render_host_preview(state, panes[1], buf),
+    }
+}
+
+fn render_form(state: &SshState, form: &HostForm, area: Rect, buf: &mut Buffer) {
+    let title = format!(
+        " {}{} ",
+        form.value(Field::Alias),
+        if form.is_dirty() { "  *" } else { "" }
+    );
+    let block = Block::bordered()
+        .title(title)
+        .border_type(BorderType::Rounded)
+        .style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(Field::ALL.len() as u16),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+
+    render_fields(form, chunks[0], buf);
+
+    match &form.editing {
+        Some(Editing::Pick { options, index }) => {
+            render_candidates(options, *index, chunks[2], buf)
+        }
+        _ => render_form_footer(state, form, chunks[2], buf),
+    }
+}
+
+fn render_fields(form: &HostForm, area: Rect, buf: &mut Buffer) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); Field::ALL.len()])
+        .split(area);
+
+    for (i, field) in Field::ALL.iter().enumerate() {
+        let selected = i == form.cursor;
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(16), Constraint::Min(0)])
+            .split(rows[i]);
+
+        let label = format!("{} {}", if selected { ">" } else { " " }, field.label());
+        let label_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Paragraph::new(label)
+            .style(label_style)
+            .render(columns[0], buf);
+
+        if selected && let Some(Editing::Text(textarea)) = &form.editing {
+            Widget::render(&**textarea, columns[1], buf);
+            continue;
+        }
+
+        let value = &form.values[i];
+        let locked = *field == Field::Alias && form.alias_locked;
+        let (text, style) = if locked {
+            (
+                format!("{value}   (multiple patterns)"),
+                Style::default().fg(Color::DarkGray),
+            )
+        } else if value.is_empty() {
+            ("(none)".to_string(), Style::default().fg(Color::DarkGray))
+        } else {
+            (value.clone(), Style::default())
+        };
+        Paragraph::new(text).style(style).render(columns[1], buf);
+    }
+}
+
+fn render_candidates(options: &[String], index: usize, area: Rect, buf: &mut Buffer) {
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, option)| {
+            let text = if option.is_empty() {
+                "(none)".to_string()
+            } else {
+                option.clone()
+            };
+            let style = if i == index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(format!("  {text}"))).style(style)
+        })
+        .collect();
+
+    List::new(items)
+        .block(
+            Block::bordered()
+                .title(" j/k choose · Enter accept · i type · Esc cancel ")
+                .border_type(BorderType::Rounded),
+        )
+        .render(area, buf);
+}
+
+fn render_form_footer(state: &SshState, form: &HostForm, area: Rect, buf: &mut Buffer) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if !form.other.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  kept as written ({})", form.other.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        for directive in &form.other {
+            lines.push(Line::from(Span::styled(
+                format!("    {directive}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    let plan = form.plan(&state.config);
+    if plan.changes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no changes",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  will write",
+            Style::default().fg(Color::Yellow),
+        )));
+        for change in &plan.changes {
+            match change {
+                Change::Replaced {
+                    line,
+                    before,
+                    after,
+                } => {
+                    lines.push(diff_line('-', line + 1, before, Color::Red));
+                    lines.push(diff_line('+', line + 1, after, Color::Green));
+                }
+                Change::Removed { line, before } => {
+                    lines.push(diff_line('-', line + 1, before, Color::Red))
+                }
+                Change::Inserted { line, after } => {
+                    lines.push(diff_line('+', line + 1, after, Color::Green))
+                }
+            }
+        }
+    }
+
+    Paragraph::new(lines).render(area, buf);
+}
+
+fn diff_line(sign: char, number: usize, text: &str, color: Color) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {sign} {number:<4}{text}"),
+        Style::default().fg(color),
+    ))
 }
 
 fn render_host_list(state: &SshState, area: Rect, buf: &mut Buffer) {
@@ -222,7 +422,10 @@ fn render_host_list(state: &SshState, area: Rect, buf: &mut Buffer) {
                 style = style.fg(Color::DarkGray);
             }
 
-            Some(ListItem::new(Line::from(row_text(marker, host.alias(), &note, width))).style(style))
+            Some(
+                ListItem::new(Line::from(row_text(marker, host.alias(), &note, width)))
+                    .style(style),
+            )
         })
         .collect();
 
@@ -284,7 +487,10 @@ fn row_text(marker: &str, alias: &str, note: &str, width: usize) -> String {
 
 /// `HostName:Port` as written, for the one-line summary of a host.
 fn endpoint(host: &HostBlock) -> String {
-    let hostname = host.get("HostName").map(|d| d.value.as_str()).unwrap_or("-");
+    let hostname = host
+        .get("HostName")
+        .map(|d| d.value.as_str())
+        .unwrap_or("-");
     match host.get("Port") {
         Some(port) => format!("{hostname}:{}", port.value),
         None => hostname.to_string(),
@@ -295,7 +501,10 @@ fn truncate(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
     }
-    text.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+    text.chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn render_placeholder(name: &str, area: Rect, buf: &mut Buffer) {

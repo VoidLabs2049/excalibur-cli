@@ -1,9 +1,12 @@
+mod form;
 mod sshconfig;
 mod state;
 mod ui;
 
 use super::{Module, ModuleAction, ModuleId, ModuleMetadata};
 use color_eyre::Result;
+use form::Editing;
+use ratatui::crossterm::event::KeyModifiers;
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent},
@@ -66,6 +69,10 @@ impl SshModule {
             return Ok(ModuleAction::None);
         }
 
+        if self.state.form.is_some() {
+            return self.handle_form_key(key);
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.state.screen = Screen::Menu;
@@ -84,7 +91,90 @@ impl SshModule {
                 self.state.searching = true;
                 Ok(ModuleAction::None)
             }
+            KeyCode::Enter => {
+                self.state.open_form();
+                Ok(ModuleAction::None)
+            }
             _ => Ok(ModuleAction::None),
+        }
+    }
+
+    fn handle_form_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
+        if self
+            .state
+            .form
+            .as_ref()
+            .is_some_and(|form| form.editing.is_some())
+        {
+            self.handle_field_edit_key(key);
+            return Ok(ModuleAction::None);
+        }
+
+        match key.code {
+            KeyCode::Esc => self.state.form = None,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.save_form()
+            }
+            KeyCode::Enter => self.state.form_begin_edit(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(form) = &mut self.state.form {
+                    form.previous_field();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(form) = &mut self.state.form {
+                    form.next_field();
+                }
+            }
+            _ => {}
+        }
+        Ok(ModuleAction::None)
+    }
+
+    fn handle_field_edit_key(&mut self, key: KeyEvent) {
+        // Decide first, act second: the picker's own state is borrowed while it
+        // is being read, so commit/cancel cannot run inside the match.
+        enum Then {
+            Nothing,
+            Commit,
+            Cancel,
+            AsText,
+        }
+
+        let Some(form) = &mut self.state.form else {
+            return;
+        };
+        let then = match &mut form.editing {
+            Some(Editing::Pick { options, index }) => match key.code {
+                KeyCode::Esc => Then::Cancel,
+                KeyCode::Enter => Then::Commit,
+                KeyCode::Tab | KeyCode::Char('i') => Then::AsText,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *index = index.saturating_sub(1);
+                    Then::Nothing
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *index = (*index + 1).min(options.len().saturating_sub(1));
+                    Then::Nothing
+                }
+                _ => Then::Nothing,
+            },
+            Some(Editing::Text(textarea)) => match key.code {
+                KeyCode::Esc => Then::Cancel,
+                KeyCode::Enter => Then::Commit,
+                _ => {
+                    textarea.input(key);
+                    Then::Nothing
+                }
+            },
+            None => Then::Nothing,
+        };
+
+        match then {
+            Then::Nothing => {}
+            Then::Commit => form.commit_edit(),
+            Then::Cancel => form.cancel_edit(),
+            Then::AsText => form.edit_as_text(),
         }
     }
 
@@ -131,6 +221,7 @@ impl Module for SshModule {
     }
 
     fn update(&mut self) -> Result<()> {
+        self.state.expire_notification();
         Ok(())
     }
 
@@ -184,7 +275,10 @@ mod tests {
 
     #[test]
     fn cursor_starts_on_the_dashboard() {
-        assert_eq!(SshModule::new().state.menu_entry().screen, Screen::Dashboard);
+        assert_eq!(
+            SshModule::new().state.menu_entry().screen,
+            Screen::Dashboard
+        );
     }
 
     #[test]
@@ -234,8 +328,7 @@ mod tests {
 
     #[test]
     fn a_gateway_is_shown_next_to_its_host() {
-        let module =
-            on_config_screen("Host a\n  ProxyCommand ssh bastion -W %h:%p\n  Port 22\n");
+        let module = on_config_screen("Host a\n  ProxyCommand ssh bastion -W %h:%p\n  Port 22\n");
         assert!(rendered(&module).contains("via bastion"));
     }
 
@@ -271,6 +364,49 @@ mod tests {
     }
 
     #[test]
+    fn enter_opens_the_form_and_esc_closes_it() {
+        let mut module = on_config_screen("Host kami\n  Port 22\n");
+        press(&mut module, KeyCode::Enter);
+        assert!(module.state.form.is_some());
+        press(&mut module, KeyCode::Esc);
+        assert!(module.state.form.is_none());
+        assert_eq!(module.state.screen, Screen::Config);
+    }
+
+    #[test]
+    fn a_picker_field_offers_the_values_already_in_the_config() {
+        let mut module = on_config_screen("Host a\n  User root\nHost b\n  User lxb\n");
+        press(&mut module, KeyCode::Enter); // open form on `a`
+        press(&mut module, KeyCode::Char('j')); // HostName
+        press(&mut module, KeyCode::Char('j')); // User
+        press(&mut module, KeyCode::Enter); // open the picker
+        let out = rendered(&module);
+        assert!(
+            out.contains("lxb"),
+            "picker missing a value from the config"
+        );
+        assert!(out.contains("(none)"), "picker cannot clear the field");
+    }
+
+    #[test]
+    fn typing_into_a_field_shows_up_in_the_diff() {
+        let mut module = on_config_screen("Host a\n  Port 22\n");
+        press(&mut module, KeyCode::Enter); // form
+        for _ in 0..3 {
+            press(&mut module, KeyCode::Char('j')); // to Port
+        }
+        press(&mut module, KeyCode::Enter); // text box
+        press(&mut module, KeyCode::Char('3'));
+        press(&mut module, KeyCode::Enter); // commit
+        let out = rendered(&module);
+        assert!(out.contains("will write"), "no diff shown");
+        assert!(
+            out.contains("Port 223"),
+            "edited value missing from the diff"
+        );
+    }
+
+    #[test]
     fn the_menu_preview_summarises_the_config() {
         let mut module = on_config_screen("Host kami\n  Port 22\nHost kami\n  Port 22\n");
         module.state.screen = Screen::Menu;
@@ -280,5 +416,3 @@ mod tests {
         assert!(out.contains("1 shadowed"), "missing shadow count");
     }
 }
-
-

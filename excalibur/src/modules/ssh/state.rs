@@ -1,4 +1,9 @@
+use super::form::{Field, HostForm, write_config};
 use super::sshconfig::{HostBlock, SshConfig};
+use std::time::{Duration, Instant};
+
+/// How long a save / error message stays on screen.
+const NOTIFICATION_TTL: Duration = Duration::from_secs(5);
 
 /// Top-level screens inside the SSH module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +62,10 @@ pub struct SshState {
     pub searching: bool,
     pub filtered_indices: Vec<usize>,
     pub selected_index: usize,
+
+    /// The form for the selected host, replacing the preview pane while open.
+    pub form: Option<HostForm>,
+    pub notification: Option<(String, Instant)>,
 }
 
 impl SshState {
@@ -70,6 +79,8 @@ impl SshState {
             searching: false,
             filtered_indices: Vec::new(),
             selected_index: 0,
+            form: None,
+            notification: None,
         }
     }
 
@@ -141,6 +152,64 @@ impl SshState {
     pub fn shadowing_line(&self, host: &HostBlock) -> Option<usize> {
         let by = host.shadowed_by?;
         Some(self.config.hosts.get(by)?.start + 1)
+    }
+
+    /// Needs the config for the candidate list, so it lives here where the two
+    /// fields can be borrowed apart.
+    pub fn form_begin_edit(&mut self) {
+        let config = &self.config;
+        if let Some(form) = self.form.as_mut() {
+            form.begin_edit(config);
+        }
+    }
+
+    pub fn open_form(&mut self) {
+        if let Some(&index) = self.filtered_indices.get(self.selected_index) {
+            self.form = HostForm::new(&self.config, index);
+        }
+    }
+
+    pub fn notify(&mut self, message: impl Into<String>) {
+        self.notification = Some((message.into(), Instant::now()));
+    }
+
+    pub fn expire_notification(&mut self) {
+        if let Some((_, at)) = &self.notification
+            && at.elapsed() > NOTIFICATION_TTL
+        {
+            self.notification = None;
+        }
+    }
+
+    /// Write the open form back to disk, then re-read so the line numbers the
+    /// UI shows match the file again.
+    pub fn save_form(&mut self) {
+        let Some(form) = &self.form else { return };
+        let plan = form.plan(&self.config);
+        if plan.changes.is_empty() {
+            self.notify("No changes");
+            return;
+        }
+        let alias = form.value(Field::Alias).to_string();
+        match write_config(&self.config, &plan.lines) {
+            Ok(backup) => {
+                self.form = None;
+                self.load_config();
+                self.select_alias(&alias);
+                self.notify(format!("Saved. Backup: {}", backup.display()));
+            }
+            Err(e) => self.notify(format!("Save failed: {e}")),
+        }
+    }
+
+    fn select_alias(&mut self, alias: &str) {
+        if let Some(row) = self
+            .filtered_indices
+            .iter()
+            .position(|i| self.config.hosts.get(*i).map(HostBlock::alias) == Some(alias))
+        {
+            self.selected_index = row;
+        }
     }
 }
 

@@ -52,7 +52,9 @@ impl HostBlock {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
         }
-        proxy_command_gateway(&self.get("ProxyCommand")?.value)
+        let value = &self.get("ProxyCommand")?.value;
+        let (start, end) = proxy_command_gateway_span(value)?;
+        Some(value[start..end].to_string())
     }
 }
 
@@ -142,10 +144,6 @@ impl SshConfig {
             read_only: false,
         }
     }
-
-    pub fn to_text(&self) -> String {
-        self.lines.join("\n")
-    }
 }
 
 /// Split `Key Value` or `Key=Value`, returning `None` for blanks and comments.
@@ -161,17 +159,20 @@ fn split_directive(raw: &str) -> Option<(&str, &str)> {
     Some((key, value))
 }
 
-/// Pull the jump host out of a `ProxyCommand ... -W %h:%p` line. Configs written
-/// before `ProxyJump` existed express gateways this way; without this the
-/// gateway of such a host reads as unset and its jump chain becomes invisible.
-fn proxy_command_gateway(value: &str) -> Option<String> {
-    let tokens: Vec<&str> = value.split_whitespace().collect();
-    if !tokens.iter().any(|t| *t == "-W") {
+/// Byte span of the jump host inside a `ProxyCommand ... -W %h:%p` value.
+///
+/// Configs written before `ProxyJump` existed express gateways this way, so
+/// without this their jump chains read as unset. A span rather than a copy so
+/// that editing can splice the new host in and leave the rest of the command --
+/// including an absolute path to the ssh binary -- exactly as written.
+pub fn proxy_command_gateway_span(value: &str) -> Option<(usize, usize)> {
+    let tokens = tokens_with_offsets(value);
+    if !tokens.iter().any(|(_, t)| *t == "-W") {
         return None;
     }
     let mut skip_next = false;
     // Token 0 is the ssh binary, which may be an absolute store path.
-    for token in tokens.iter().skip(1) {
+    for (offset, token) in tokens.iter().skip(1) {
         if skip_next {
             skip_next = false;
             continue;
@@ -180,9 +181,27 @@ fn proxy_command_gateway(value: &str) -> Option<String> {
             skip_next = matches!(flag, "W" | "o" | "p" | "i" | "l" | "F");
             continue;
         }
-        return Some((*token).to_string());
+        return Some((*offset, offset + token.len()));
     }
     None
+}
+
+fn tokens_with_offsets(text: &str) -> Vec<(usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if let Some(begin) = start.take() {
+                tokens.push((begin, &text[begin..i]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(begin) = start {
+        tokens.push((begin, &text[begin..]));
+    }
+    tokens
 }
 
 fn mark_shadowed(hosts: &mut [HostBlock]) {
@@ -299,13 +318,13 @@ mod tests {
 
     #[test]
     fn round_trips_byte_for_byte() {
-        assert_eq!(parse(FIXTURE).to_text(), FIXTURE);
+        assert_eq!(parse(FIXTURE).lines.join("\n"), FIXTURE);
     }
 
     #[test]
     fn round_trips_crlf_and_a_missing_final_newline() {
         let text = "Host a\r\n  Port 22\r\nHost b\r\n  Port 23";
-        assert_eq!(parse(text).to_text(), text);
+        assert_eq!(parse(text).lines.join("\n"), text);
     }
 
     #[test]
@@ -324,7 +343,10 @@ mod tests {
     #[test]
     fn trailing_space_in_a_host_pattern_is_trimmed() {
         let block = find(&parse(FIXTURE), "xx-trade-wsl1").cloned();
-        assert!(block.is_some(), "pattern with a trailing space was not found");
+        assert!(
+            block.is_some(),
+            "pattern with a trailing space was not found"
+        );
     }
 
     #[test]
@@ -428,18 +450,33 @@ mod tests {
             return;
         }
         let config = SshConfig::load_from(&path).unwrap();
-        assert_eq!(config.to_text(), std::fs::read_to_string(&path).unwrap());
+        assert_eq!(
+            config.lines.join("\n"),
+            std::fs::read_to_string(&path).unwrap()
+        );
 
         let mut previous_end = 0;
         for block in &config.hosts {
             assert!(!block.alias().is_empty());
             assert!(block.start < block.end);
-            assert!(block.start >= previous_end, "blocks overlap at {}", block.start);
+            assert!(
+                block.start >= previous_end,
+                "blocks overlap at {}",
+                block.start
+            );
             previous_end = block.end;
         }
 
-        let gateways = config.hosts.iter().filter(|b| b.gateway().is_some()).count();
-        let shadowed = config.hosts.iter().filter(|b| b.shadowed_by.is_some()).count();
+        let gateways = config
+            .hosts
+            .iter()
+            .filter(|b| b.gateway().is_some())
+            .count();
+        let shadowed = config
+            .hosts
+            .iter()
+            .filter(|b| b.shadowed_by.is_some())
+            .count();
         eprintln!(
             "real config: {} hosts, {} with a gateway, {} shadowed, read_only={}",
             config.hosts.len(),
