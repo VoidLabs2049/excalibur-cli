@@ -146,10 +146,6 @@ impl SshConfig {
     pub fn to_text(&self) -> String {
         self.lines.join("\n")
     }
-
-    pub fn find(&self, alias: &str) -> Option<&HostBlock> {
-        self.hosts.iter().find(|b| b.alias() == alias)
-    }
 }
 
 /// Split `Key Value` or `Key=Value`, returning `None` for blanks and comments.
@@ -297,6 +293,10 @@ mod tests {
         SshConfig::parse(Path::new("/tmp/config"), text)
     }
 
+    fn find<'a>(config: &'a SshConfig, alias: &str) -> Option<&'a HostBlock> {
+        config.hosts.iter().find(|b| b.alias() == alias)
+    }
+
     #[test]
     fn round_trips_byte_for_byte() {
         assert_eq!(parse(FIXTURE).to_text(), FIXTURE);
@@ -318,21 +318,21 @@ mod tests {
     #[test]
     fn indented_host_header_still_starts_a_block() {
         // ` Host kami` is indented by one space in the real file.
-        assert!(parse(FIXTURE).find("kami").is_some());
+        assert!(find(&parse(FIXTURE), "kami").is_some());
     }
 
     #[test]
     fn trailing_space_in_a_host_pattern_is_trimmed() {
-        let block = parse(FIXTURE).find("xx-trade-wsl1").cloned();
+        let block = find(&parse(FIXTURE), "xx-trade-wsl1").cloned();
         assert!(block.is_some(), "pattern with a trailing space was not found");
     }
 
     #[test]
     fn key_lookup_ignores_case_but_the_written_key_is_kept() {
         let config = parse(FIXTURE);
-        let wsl = config.find("xx-trade-wsl1").unwrap();
+        let wsl = find(&config, "xx-trade-wsl1").unwrap();
         assert_eq!(wsl.get("hostname").unwrap().key, "HostName");
-        let gh = config.find("github.com").unwrap();
+        let gh = find(&config, "github.com").unwrap();
         assert_eq!(gh.get("HOSTNAME").unwrap().key, "Hostname");
     }
 
@@ -340,7 +340,7 @@ mod tests {
     fn gateway_is_recovered_from_a_legacy_proxycommand() {
         let config = parse(FIXTURE);
         assert_eq!(
-            config.find("github.com").unwrap().gateway().as_deref(),
+            find(&config, "github.com").unwrap().gateway().as_deref(),
             Some("lxb@kami")
         );
     }

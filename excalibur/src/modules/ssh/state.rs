@@ -1,3 +1,5 @@
+use super::sshconfig::{HostBlock, SshConfig};
+
 /// Top-level screens inside the SSH module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -46,6 +48,15 @@ const DEFAULT_MENU_INDEX: usize = 2;
 pub struct SshState {
     pub screen: Screen,
     pub menu_index: usize,
+
+    pub config: SshConfig,
+    /// Why the last load failed. The host list shows this instead of rows.
+    pub config_error: Option<String>,
+
+    pub search_query: String,
+    pub searching: bool,
+    pub filtered_indices: Vec<usize>,
+    pub selected_index: usize,
 }
 
 impl SshState {
@@ -53,19 +64,83 @@ impl SshState {
         Self {
             screen: Screen::Menu,
             menu_index: DEFAULT_MENU_INDEX,
+            config: SshConfig::default(),
+            config_error: None,
+            search_query: String::new(),
+            searching: false,
+            filtered_indices: Vec::new(),
+            selected_index: 0,
         }
     }
 
-    pub fn select_next(&mut self) {
+    /// Re-read the config from disk. `~/.ssh/config` is the single source of
+    /// truth and is edited outside this tool too, so it is never cached across
+    /// entries into the module.
+    pub fn load_config(&mut self) {
+        match SshConfig::load() {
+            Ok(config) => {
+                self.config = config;
+                self.config_error = None;
+            }
+            Err(e) => {
+                self.config = SshConfig::default();
+                self.config_error = Some(e.to_string());
+            }
+        }
+        self.apply_filters();
+    }
+
+    pub fn apply_filters(&mut self) {
+        self.filtered_indices = if self.search_query.is_empty() {
+            (0..self.config.hosts.len()).collect()
+        } else {
+            let query = self.search_query.to_lowercase();
+            self.config
+                .hosts
+                .iter()
+                .enumerate()
+                .filter(|(_, host)| host.alias().to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        self.selected_index = 0;
+    }
+
+    pub fn menu_next(&mut self) {
         self.menu_index = (self.menu_index + 1) % MENU.len();
     }
 
-    pub fn select_previous(&mut self) {
+    pub fn menu_previous(&mut self) {
         self.menu_index = (self.menu_index + MENU.len() - 1) % MENU.len();
     }
 
-    pub fn selected(&self) -> MenuEntry {
+    pub fn menu_entry(&self) -> MenuEntry {
         MENU[self.menu_index]
+    }
+
+    pub fn host_next(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            self.selected_index = (self.selected_index + 1) % self.filtered_indices.len();
+        }
+    }
+
+    pub fn host_previous(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            let len = self.filtered_indices.len();
+            self.selected_index = (self.selected_index + len - 1) % len;
+        }
+    }
+
+    pub fn selected_host(&self) -> Option<&HostBlock> {
+        let index = *self.filtered_indices.get(self.selected_index)?;
+        self.config.hosts.get(index)
+    }
+
+    /// Line number, 1-based, of the block that shadows `host` -- what the user
+    /// needs in order to find the block that is actually in effect.
+    pub fn shadowing_line(&self, host: &HostBlock) -> Option<usize> {
+        let by = host.shadowed_by?;
+        Some(self.config.hosts.get(by)?.start + 1)
     }
 }
 
