@@ -1,3 +1,4 @@
+mod sshconfig;
 mod state;
 mod ui;
 
