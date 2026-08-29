@@ -82,6 +82,12 @@ pub struct SshState {
     pub config: SshConfig,
     /// Why the last load failed. The host list shows this instead of rows.
     pub config_error: Option<String>,
+    /// The file as it was on the way in, for `U`.
+    ///
+    /// The on-disk backup only ever holds the state before the *last* save, so
+    /// two saves put the file the user walked in with out of reach. This is the
+    /// copy that does not get overwritten.
+    pub pristine: Option<Vec<String>>,
 
     pub search_query: String,
     pub searching: bool,
@@ -122,6 +128,7 @@ impl SshState {
             menu_index: DEFAULT_MENU_INDEX,
             config: SshConfig::default(),
             config_error: None,
+            pristine: None,
             search_query: String::new(),
             searching: false,
             filtered_indices: Vec::new(),
@@ -156,6 +163,11 @@ impl SshState {
                 self.config = SshConfig::default();
                 self.config_error = Some(e.to_string());
             }
+        }
+        // Only the first load of the session. Every later one runs after a save,
+        // and taking the snapshot again there would make `U` a no-op.
+        if self.pristine.is_none() && self.config_error.is_none() {
+            self.pristine = Some(self.config.lines.clone());
         }
         self.apply_filters();
     }
@@ -556,9 +568,50 @@ impl SshState {
                 self.form = None;
                 self.load_config();
                 self.select_alias(&alias);
-                self.notify(format!("Saved. Backup: {}{caveat}", backup.display()));
+                // "Backup: <path>" read as "your original is safe there". It is
+                // overwritten every save, so after the second one it is not.
+                self.notify(format!(
+                    "Saved. U: undo the session. {} = before this save{caveat}",
+                    backup.display()
+                ));
             }
             Err(e) => self.notify(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Whether the file differs from the one this session started on.
+    pub fn can_undo(&self) -> bool {
+        self.pristine
+            .as_ref()
+            .is_some_and(|original| *original != self.config.lines)
+    }
+
+    /// Put the file back the way it was when the module was entered.
+    ///
+    /// Deliberately not gated on [`effective::check`]: the content being
+    /// restored is what was already on disk, so it cannot be worse than what is
+    /// there now -- and a config that was broken before this session started
+    /// would otherwise be impossible to get back to.
+    ///
+    /// This is itself undoable: `write_config` backs up the current file first,
+    /// so the edits being discarded land in `config.excalibur.bak`.
+    pub fn undo_config(&mut self) {
+        let Some(original) = self.pristine.clone() else {
+            self.notify("Nothing to undo -- the config was never read");
+            return;
+        };
+        if !self.can_undo() {
+            self.notify("Nothing to undo -- unchanged since you came in");
+            return;
+        }
+        match write_config(&self.config, &original) {
+            Ok(backup) => {
+                self.form = None;
+                self.effective = None;
+                self.load_config();
+                self.notify(format!("Undone. Your edits are in {}", backup.display()));
+            }
+            Err(e) => self.notify(format!("Undo failed: {e}")),
         }
     }
 

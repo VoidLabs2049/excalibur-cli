@@ -109,6 +109,12 @@ impl SshModule {
                 self.state.toggle_effective();
                 Ok(ModuleAction::None)
             }
+            // Uppercase: it rewrites the file, so it should not sit next to the
+            // navigation keys under a finger.
+            KeyCode::Char('U') => {
+                self.state.undo_config();
+                Ok(ModuleAction::None)
+            }
             KeyCode::Enter => {
                 self.state.open_form();
                 Ok(ModuleAction::None)
@@ -1128,6 +1134,72 @@ mod tests {
             spec: spec.into(),
             host: "nowhere".into(),
         }
+    }
+
+    #[test]
+    fn undo_restores_the_file_the_session_started_with_and_keeps_the_edits() {
+        // The on-disk backup only ever holds the state before the *last* save,
+        // so after two saves the file walked in with is out of reach. That gap
+        // is the whole reason `pristine` exists.
+        let dir = std::env::temp_dir().join(format!("excalibur-c2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let original = "Host a\n  Port 22\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut module = SshModule::new();
+        module.state.config = SshConfig::load_from(&path).unwrap();
+        module.state.pristine = Some(module.state.config.lines.clone());
+        assert!(!module.state.can_undo(), "unchanged, yet offers an undo");
+
+        // Stands in for two saves: what is on disk now is a later edit, and the
+        // backup beside it holds the one before that -- not the original.
+        let edited = "Host a\n  Port 3333\n";
+        std::fs::write(&path, edited).unwrap();
+        module.state.config = SshConfig::load_from(&path).unwrap();
+        assert!(module.state.can_undo(), "the change went unnoticed");
+
+        module.state.undo_config();
+        let restored = std::fs::read_to_string(&path).unwrap();
+        let backup = std::fs::read_to_string(dir.join("config.excalibur.bak")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(restored, original, "the original did not come back");
+        // Undo has to be undoable too, or it is just a second way to lose work.
+        assert_eq!(backup, edited, "the discarded edits were not kept");
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_says_so_rather_than_rewriting_the_file() {
+        let mut module = on_config_screen("Host a\n  Port 22\n");
+        module.state.pristine = Some(module.state.config.lines.clone());
+        module.state.undo_config();
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("Nothing to undo"), "got: {message}");
+    }
+
+    #[test]
+    fn undo_is_offered_only_once_there_is_something_to_undo() {
+        let mut module = on_config_screen("Host a\n  Port 22\n");
+        module.state.pristine = Some(module.state.config.lines.clone());
+        assert!(
+            !rendered(&module).contains("U: undo"),
+            "advertises a key whose only answer is `nothing to undo`"
+        );
+
+        module.state.config = SshConfig::parse(Path::new("/tmp/config"), "Host a\n  Port 3333\n");
+        assert!(rendered(&module).contains("U: undo"));
+    }
+
+    #[test]
+    fn the_snapshot_is_taken_once_not_on_every_reload() {
+        // load_config() runs again after every save. Re-snapshotting there would
+        // leave `U` looking available and doing nothing.
+        let mut module = SshModule::new();
+        let marker = vec!["as it was when we came in".to_string()];
+        module.state.pristine = Some(marker.clone());
+        module.state.load_config();
+        assert_eq!(module.state.pristine, Some(marker));
     }
 
     #[test]

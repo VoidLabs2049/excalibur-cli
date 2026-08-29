@@ -86,8 +86,11 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             } else {
                 format!("   filter: /{}", state.search_query)
             };
+            // Offered only once there is something to undo, so it never
+            // advertises a key whose whole answer is "nothing to undo".
+            let undo = if state.can_undo() { "   U: undo" } else { "" };
             format!(
-                " j/k: navigate   Enter: edit   g: ssh -G   /: search   Esc: back   q: quit{filter}"
+                " j/k: navigate   Enter: edit   g: ssh -G   /: search{undo}   Esc: back   q: quit{filter}"
             )
         }
         Screen::Forward

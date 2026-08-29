@@ -121,6 +121,12 @@ different outcome.
   Its staged copy goes beside the real config and inherits its mode: ssh
   refuses a config file it considers too open, and that refusal would surface
   here as a bogus syntax error.
+- **`pristine` is captured on the first successful load only.** `load_config()`
+  runs again after every save; re-snapshotting there leaves `U` looking
+  available and doing nothing. `undo_config` deliberately skips
+  `effective::check` — restoring what was already on disk cannot be worse than
+  what is there now, and a config broken before the session started would
+  otherwise be unreachable.
 
 ## Data flow
 
@@ -150,7 +156,7 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-146 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+150 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.
