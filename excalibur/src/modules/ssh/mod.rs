@@ -279,7 +279,15 @@ impl SshModule {
             KeyCode::Char('q') => return Ok(ModuleAction::Exit),
             KeyCode::Up | KeyCode::Char('k') => self.state.forward_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
+            // Enter stays a toggle because it acts on exactly one rule. The
+            // scope keys cannot: with a mixed set of running and stopped rules
+            // there is no answer to which way a toggle should go.
             KeyCode::Enter => self.state.toggle_selected_tunnel(),
+            KeyCode::Char(' ') => self.state.toggle_mark(),
+            KeyCode::Char('g') => self.state.toggle_group_mark(),
+            KeyCode::Char('u') => self.state.clear_marks(),
+            KeyCode::Char('s') => self.state.start_scope(),
+            KeyCode::Char('S') => self.state.stop_scope(),
             KeyCode::Char('a') => self.state.start_all(),
             KeyCode::Char('A') => self.state.stop_all(),
             KeyCode::Char('r') => self.state.refresh_tunnels(),
@@ -920,6 +928,145 @@ mod tests {
                 .to_forward()
                 .bind,
             "0.0.0.0:39002"
+        );
+    }
+
+    #[test]
+    fn space_marks_the_cursor_and_the_scope_follows_the_marks() {
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![(
+                "daily",
+                vec![forward("39001"), forward("39002"), forward("39003")],
+            )],
+        );
+        // Nothing marked: the scope is the one under the cursor.
+        assert_eq!(module.state.scope(), vec![(0, 0)]);
+
+        press(&mut module, KeyCode::Char(' '));
+        press(&mut module, KeyCode::Char('j'));
+        press(&mut module, KeyCode::Char('j'));
+        press(&mut module, KeyCode::Char(' '));
+        assert_eq!(module.state.scope(), vec![(0, 0), (0, 2)]);
+
+        // ...and marking is a toggle, not an accumulate-only.
+        press(&mut module, KeyCode::Char(' '));
+        assert_eq!(module.state.scope(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn the_scope_comes_out_in_screen_order_not_hash_order() {
+        // It drives both what runs and what the message counts, so a set
+        // iteration order would make either one unpredictable.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001"), forward("39002")]),
+                ("lab", vec![forward("39003")]),
+            ],
+        );
+        module.state.marked = [(1, 0), (0, 1), (0, 0)].into_iter().collect();
+        assert_eq!(module.state.scope(), vec![(0, 0), (0, 1), (1, 0)]);
+    }
+
+    #[test]
+    fn g_marks_the_whole_group_and_a_second_press_clears_it() {
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![
+                ("daily", vec![forward("39001"), forward("39002")]),
+                ("lab", vec![forward("39003")]),
+            ],
+        );
+        press(&mut module, KeyCode::Char('g'));
+        assert_eq!(
+            module.state.scope(),
+            vec![(0, 0), (0, 1)],
+            "group not marked"
+        );
+
+        press(&mut module, KeyCode::Char('g'));
+        assert!(module.state.marked.is_empty(), "second press did not clear");
+
+        // A partly marked group fills rather than clears -- otherwise one
+        // stray mark would make `g` look like it does nothing.
+        press(&mut module, KeyCode::Char(' '));
+        press(&mut module, KeyCode::Char('g'));
+        assert_eq!(module.state.scope(), vec![(0, 0), (0, 1)]);
+    }
+
+    #[test]
+    fn u_clears_every_mark() {
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        press(&mut module, KeyCode::Char(' '));
+        press(&mut module, KeyCode::Char('u'));
+        assert!(module.state.marked.is_empty());
+    }
+
+    #[test]
+    fn starting_a_scope_reports_the_incomplete_rules_it_skipped() {
+        // Inherited from `a`: a rule that is quietly left out reads as one that
+        // failed for no reason.
+        //
+        // The complete rule is given a process so nothing is actually launched
+        // -- a startable rule here would have this test spawning real ssh.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![forward("39001"), incomplete_rule()])],
+        );
+        let up = forward("39001");
+        module.state.running = vec![supervisor::Running {
+            pid: 4242,
+            kind: up.kind,
+            spec: up.spec(),
+            host: up.host.clone(),
+        }];
+        press(&mut module, KeyCode::Char('g')); // mark both
+        press(&mut module, KeyCode::Char('s'));
+        let (message, _) = module.state.notification.clone().expect("a report");
+        assert!(message.contains("incomplete"), "got: {message}");
+    }
+
+    #[test]
+    fn the_footer_says_what_the_scope_keys_will_act_on() {
+        // s/S mean one thing with marks and another without, so the screen has
+        // to say which -- an invisible mode otherwise.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![forward("39001"), forward("39002")])],
+        );
+        assert!(
+            rendered(&module).contains("Space: mark"),
+            "no way to discover marking"
+        );
+
+        press(&mut module, KeyCode::Char(' '));
+        let out = rendered(&module);
+        assert!(out.contains("start 1 marked"), "scope not stated: {out:?}");
+        assert!(out.contains(" + "), "the marked row is not flagged");
+    }
+
+    #[test]
+    fn deleting_a_rule_drops_the_marks_that_pointed_past_it() {
+        // Marks are positions. After a delete every one of them names a
+        // different rule than the one that was picked.
+        let mut module = SshModule::new();
+        with_profiles(
+            &mut module,
+            vec![("daily", vec![forward("39001"), forward("39002")])],
+        );
+        press(&mut module, KeyCode::Char('g'));
+        assert_eq!(module.state.marked.len(), 2);
+        module.state.remove_selected_forward();
+        assert!(
+            module.state.marked.is_empty(),
+            "a mark survived a delete and now names a different rule"
         );
     }
 

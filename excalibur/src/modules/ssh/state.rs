@@ -5,7 +5,7 @@ use super::sshconfig::{HostBlock, SshConfig};
 use super::supervisor::{self, Running};
 use super::tunnels::{Forward, Kind, Profile, Tunnels};
 use super::worker::{Job, Outcome, Slot, Worker};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// How long a save / error message stays on screen.
@@ -85,6 +85,9 @@ pub struct SshState {
     /// Index into `tunnels.all()`, so it walks profiles transparently.
     pub forward_index: usize,
     pub forward_form: Option<ForwardForm>,
+    /// Rules picked out for the next start/stop. A `Slot` is a position, not an
+    /// identity, so this is emptied whenever the file underneath it can shift.
+    pub marked: HashSet<Slot>,
 
     /// Tunnel processes found on this machine, refreshed on a timer.
     pub running: Vec<Running>,
@@ -112,6 +115,7 @@ impl SshState {
             tunnels_error: None,
             forward_index: 0,
             forward_form: None,
+            marked: HashSet::new(),
             running: Vec::new(),
             health: HashMap::new(),
             worker: Worker::spawn(),
@@ -149,6 +153,7 @@ impl SshState {
             }
         }
         self.forward_index = 0;
+        self.marked.clear();
     }
 
     pub fn forward_next(&mut self) {
@@ -349,12 +354,24 @@ impl SshState {
                 self.forward_index = self
                     .forward_index
                     .min(self.tunnels.count().saturating_sub(1));
+                // A move reorders the rules around it, and marks name positions.
+                self.marked.clear();
             }
         }
         Ok(())
     }
 
     pub fn delete_forward(&mut self) {
+        self.remove_selected_forward();
+        match self.tunnels.save() {
+            Ok(_) => self.notify("Deleted"),
+            Err(e) => self.notify(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Drop the selected rule from the model. Split from the write for the same
+    /// reason as [`Self::apply_forward_form`].
+    pub(super) fn remove_selected_forward(&mut self) {
         let Some(&(profile, index)) = self.tunnels.all().get(self.forward_index) else {
             return;
         };
@@ -366,10 +383,9 @@ impl SshState {
         self.forward_index = self
             .forward_index
             .min(self.tunnels.count().saturating_sub(1));
-        match self.tunnels.save() {
-            Ok(_) => self.notify("Deleted"),
-            Err(e) => self.notify(format!("Save failed: {e}")),
-        }
+        // Everything past the hole shifted down one, so every mark now names a
+        // different rule than the one that was picked.
+        self.marked.clear();
     }
 
     pub fn apply_filters(&mut self) {
@@ -614,9 +630,79 @@ impl SshState {
         }
     }
 
+    /// Mark or unmark the rule under the cursor.
+    pub fn toggle_mark(&mut self) {
+        let Some(slot) = self.selected_slot() else {
+            return;
+        };
+        if !self.marked.remove(&slot) {
+            self.marked.insert(slot);
+        }
+    }
+
+    /// Mark the cursor's whole group, or clear it if it is already all marked.
+    pub fn toggle_group_mark(&mut self) {
+        let Some(profile) = self.selected_profile() else {
+            return;
+        };
+        let group: Vec<Slot> = self
+            .tunnels
+            .all()
+            .into_iter()
+            .filter(|slot| slot.0 == profile)
+            .collect();
+        if group.iter().all(|slot| self.marked.contains(slot)) {
+            group.iter().for_each(|slot| {
+                self.marked.remove(slot);
+            });
+        } else {
+            self.marked.extend(group);
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    /// What a start/stop acts on: everything marked, or the cursor when nothing
+    /// is.
+    ///
+    /// Walked through `all()` so the order is the one on screen and so a mark
+    /// left pointing past the end of a shortened file simply drops out.
+    pub fn scope(&self) -> Vec<Slot> {
+        if self.marked.is_empty() {
+            return self.selected_slot().into_iter().collect();
+        }
+        self.tunnels
+            .all()
+            .into_iter()
+            .filter(|slot| self.marked.contains(slot))
+            .collect()
+    }
+
+    pub fn start_scope(&mut self) {
+        let scope = self.scope();
+        self.start_slots(&scope);
+    }
+
+    pub fn stop_scope(&mut self) {
+        let scope = self.scope();
+        self.stop_slots(&scope);
+    }
+
     pub fn start_all(&mut self) {
+        let all = self.tunnels.all();
+        self.start_slots(&all);
+    }
+
+    pub fn stop_all(&mut self) {
+        let all = self.tunnels.all();
+        self.stop_slots(&all);
+    }
+
+    fn start_slots(&mut self, slots: &[Slot]) {
         let (mut queued, mut skipped) = (0, 0);
-        for slot in self.tunnels.all() {
+        for &slot in slots {
             if self.pid_at(slot).is_some() {
                 continue;
             }
@@ -633,16 +719,16 @@ impl SshState {
         // Never silently drop one: a rule that is simply skipped reads as a rule
         // that failed for no reason.
         self.notify(match (queued, skipped) {
-            (0, 0) => "Everything is already up".to_string(),
+            (0, 0) => "Nothing to start -- already up".to_string(),
             (0, s) => format!("{s} rule(s) are incomplete; nothing to start"),
             (q, 0) => format!("Starting {q}"),
             (q, s) => format!("Starting {q}, skipped {s} incomplete"),
         });
     }
 
-    pub fn stop_all(&mut self) {
+    fn stop_slots(&mut self, slots: &[Slot]) {
         let mut queued = 0;
-        for slot in self.tunnels.all() {
+        for &slot in slots {
             if let Some(pid) = self.pid_at(slot) {
                 self.worker.submit(Job::Stop(slot, pid));
                 queued += 1;

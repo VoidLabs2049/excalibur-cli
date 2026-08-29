@@ -115,8 +115,18 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
             " j/k: navigate   Enter: edit   n: new   c: clone   d: delete   Esc: back   q: quit"
                 .to_string()
         }
+        // `s`/`S` act on the marks when there are any and on the cursor when
+        // there are not. That is one key meaning two things, so the scope is
+        // spelled out here rather than left to be remembered.
+        Screen::Dashboard if !state.marked.is_empty() => {
+            let n = state.marked.len();
+            format!(
+                " s: start {n} marked   S: stop {n} marked   Space/g: mark   u: clear   \
+                 Enter: this one   r: refresh"
+            )
+        }
         Screen::Dashboard => {
-            " j/k: navigate   Enter: start/stop   a: start all   A: stop all   r: refresh   Esc: back"
+            " j/k: navigate   Enter: start/stop   Space: mark   a: start all   A: stop all   r: refresh   Esc: back"
                 .to_string()
         }
     };
@@ -1016,8 +1026,18 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
 
             let broken = forward.problem().is_some();
             let mut line = vec![
+                // `+` rather than `*`: the lights already use `*` for "up", and
+                // a marker sharing that symbol reads as a fourth light.
                 Span::styled(
-                    format!("   {}  ", health.lights()),
+                    if state.marked.contains(&slot) {
+                        " + "
+                    } else {
+                        "   "
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{}  ", health.lights()),
                     Style::default().fg(if broken {
                         Color::Red
                     } else {
