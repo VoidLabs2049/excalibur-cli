@@ -1696,6 +1696,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_meter_lasts_exactly_as_long_as_the_process_it_measured() {
         // Left behind, a dead process's last rate sits on screen looking live.
         // This process stands in for a live tunnel so the real /proc read is

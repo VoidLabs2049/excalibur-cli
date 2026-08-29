@@ -353,13 +353,7 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
 
     #[test]
     fn a_port_nobody_serves_is_not_reachable() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        assert!(matches!(
-            reachable(&format!("127.0.0.1:{port}")),
-            Reach::Refused
-        ));
+        assert!(matches!(reachable("127.0.0.1:0"), Reach::Refused));
     }
 
     #[test]
