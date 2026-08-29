@@ -111,7 +111,7 @@ shell 集成:`install/ex.fish` 定义通用 `ex <module>`,**独占** exit-code �
 ## 4. 路线图
 
 1. ✅ **验证定位(2026-08-23 完成)** —— 见 §6
-2. **SSH:远端路径浏览器**(下一个,见 §5)
+2. **SSH:隧道仪表盘 + config 编辑器**(下一个,见 §5;原「远端路径浏览器」降级到 §5.11)
 3. **history → 模板化** —— 把 §2.2 的形状聚类做进 history 模块:同一模板下的历史
    命令折叠成一条,参数变成可填的槽。这是 §2.4 的直接推论。
 4. **nix 工作流助手** —— kami 上 ~900 条又长又难记的 nix 咒语,几乎没有好 TUI。
@@ -119,74 +119,236 @@ shell 集成:`install/ex.fish` 定义通用 `ex <module>`,**独占** exit-code �
 
 ---
 
-## 5. SSH 模块:远端路径浏览器(下一个)
+## 5. SSH 模块:隧道仪表盘 + config 编辑器(下一个)
 
-### 5.1 相对原计划砍掉了什么,为什么
+> 2026-08-29 重写。原设计(远端路径浏览器)降级为后续项,见 §5.8。
 
-原 §4 设计了 5 个动作。按吸收标准(§1)逐个复核,**只有 2 个过关**:
+### 5.1 真实场景
 
-| 动作 | 判定 | 理由 |
+在任意机器上,经跳板机开端口转发(本地 `-L` / 远程 `-R`);维护一份常用转发档案,
+启动即拉起并看到连通性。外加日常的 ssh config 增改 —— **这份文件本地经常手改**,
+不走 home-manager 声明式(明确否掉:失去手改敏捷性)。
+
+### 5.2 定量依据(2026-08-29 复核本机)
+
+| 事实 | 数据 | 推论 |
 |---|---|---|
-| 端口探测 | ✅ 保留 | `telnet host port` ×66,确实没好工具 |
-| 传输(rsync) | ✅ 保留,且是核心 | 真痛点,且正是「远端路径补不了」的问题 |
-| 连接(`ssh host`) | ❌ 砍 | fish 自带 ssh 补全已零摩擦,和「git 出局」同理 |
-| 跑远程命令 | ❌ 砍 | 摩擦低;且真痛点是 fish/bash 引号地狱(见 `~/.claude/remote-ops.md`),一个朴素的 `ssh host "cmd"` 拼接器**会让这个坑更深** |
-| 修 known_hosts | ❌ 砍 | 本地 3 次,`ssh-keygen -R host` 本身不长不难记 |
+| `~/.ssh/config` 是可写普通文件 | `readlink -f` 指向自身,不是 home-manager symlink | 旧 §5.3 的「绝不写入」前提**不成立**。但仍要运行时检测(symlink 进 store / 不可写)→ 降级只读 |
+| 文件很脏 | 3 种缩进(1/2/4 空格)、`Hostname` 18 处 vs `HostName` 17 处、3 处行尾空白(含 `Host xx-trade-wsl1 ` 的 pattern 自带尾空格) | 整文件重生成会产出 191 行 diff。**只替换目标 host 的行区间**即可,**不需要无损 CST** |
+| **重复 `Host kami`** | 行 6 与行 60,内容相同 | OpenSSH 首次匹配生效 → 行 60 整块是死的,**且完全静默**。手改有一半概率改到死块,改完行为不变 |
+| 跳板形态 100% 是 ProxyCommand | 6 处 `ProxyCommand …ssh <gw> -W %h:%p`;`ProxyJump` / `-J` 各 0 次 | 读侧必须先支持从 ProxyCommand `-W` 反解跳板,否则 6 个 host 的跳板关系不可见 |
+| 监听端口绝大多数绑 loopback | 本机 `ss -tlnH` 前 12 条有 10 条是 `127.0.0.1` | **只监听 loopback 的远端端口 = 转发的头号目标**(只能经隧道访问);`0.0.0.0` 的多半直连即可。列表应据此排序高亮 |
+| 转发用量看着很低 | history 里 `-L/-R/-D` 仅 5 条,`-J` 0 条 | 按**频率**过不了 §1 的标准;按「摩擦 × 有没有好工具」过得很干净 —— 痛点是**每次都要重想方向**,不是用得多 |
 
-### 5.2 v1 设计
+### 5.3 定位:为什么过 §1 的吸收标准
+
+- **替代多步调查**:ssh 上去 → 跑 `ss -tlnH` → 肉眼挑端口 → 记住 → 退出来 →
+  拼 `-L` 行 → 开个终端挂着 → 过一会儿忘了哪条还活着。
+- **供给必须看见才能决定的状态**:三层连通性(§5.5)、Host 块遮蔽(§5.6)。
+
+注意这个模块**基本不吐命令**,和 settings 同类:动作都是它自己落地。§1 的定位
+(参数选择器)在这里体现为「选参数」而非「吐命令」—— 吐命令始终只是机制。
+
+### 5.4 入口:菜单 + 预览框
+
+沿用 settings 已验证的布局(左列表 40% + 右预览 60%)。三项按用户指定顺序,
+但**默认光标停在第 3 项**(高频路径不该每次多按两下):
 
 ```
-选主机(~/.ssh/config Host 块 + tailscale status)
-  → 浏览远端目录树(ssh ls 驱动,可 fuzzy)      ← 唯一别人做不到的东西
-      → t: 吐 rsync 拉取行(Output,可改)
-  → p: 原生 TCP 端口探测(模块内执行,替掉 telnet)
+  1  修改 ssh config     预览 → host 列表摘要(alias / HostName:Port / ⤳ 跳板)
+  2  修改转发 config     预览 → tunnels 档案与条目
+> 3  启动 ssh 转发       预览 → 隧道状态摘要(● ● · 2 活跃 / 6)
 ```
 
-**远端路径浏览器是整个设计里唯一「shell 补不了、现成工具也没有」的东西**,
-也正是 740 条 rsync 变体的真正来源。它是 v1 的核心,不是附属功能。
+第 3 项的预览框本身即满足「启动就能看到连通性」——**不进子界面就看到了**。
+菜单页只跑 ①② 两层(纯本地文件读),第三个灯显示 `·`;③ 有真实 RTT,进去才跑。
 
-### 5.3 关键设计点
+### 5.5 隧道仪表盘
 
-1. **emit vs 原生分流**:传输 = `Output`(可编辑);端口探测 = 模块内执行,不吐命令。
-   复用现有 exit-code 模式,零新架构。
-2. **NixOS 安全**:`~/.ssh/config` 由 home-manager 生成,**只读解析**,绝不写入
-   (否则 `nixos-rebuild` 会覆盖)。
-3. **主机发现**:`~/.ssh/config` + `tailscale status`(若存在)。tailnet `100.x`
-   主机是 sshm/hop 没有的差异点。
-4. **Overlay 存储**:每主机的小元数据(常用端口、路径书签)—— 只读 ssh config 装不下。
+**连通性拆三层,分开显示才有价值:**
 
-### 5.4 模块结构(拟)
+| 层 | 回答 | 怎么测 | 节奏 |
+|---|---|---|---|
+| ① 进程 | `ssh -N` 还活着吗 | procfs 扫 argv | `update()` 节流 1s |
+| ② 绑定 | 本地端口真的 LISTEN 了吗 | `/proc/net/tcp` | 同上 |
+| ③ 端到端 | 连过去对面真有东西吗 | `TcpStream::connect` 本地端口 | **后台线程**,进入 / `r` / 每 10s |
+
+拆开才能看出两类静默失败:**①绿②红** = 端口被占用,转发未生效;
+**①②绿③红** = 隧道通但远端服务挂了。③ 可行是因为 `-L` 是懒的 ——
+本机 accept 后才建远端连接,远端失败则连接立刻被关。
+
+**起隧道的固定形态:**
+
+```
+ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L <bind>:<target> <host>
+```
+
+- `BatchMode=yes` **不是可选的**:不加的话 agent 无 key 时 ssh 会等着读密码,
+  而 TUI 正占着终端 → **界面直接卡死**。
+- `ExitOnForwardFailure=yes`:不加则端口被占用时进程照常活着、转发静默失效。
+- `-f` 自行 detach,excalibur **不做父进程**;每次启动扫 procfs 按 argv 精确认领。
+  好处:退出 TUI 隧道继续活、重进自动看到绿灯。
+- **按 pid 杀,不按模式杀** —— 天然避开 `~/.claude/remote-ops.md` 的 `pkill -f` 自匹配坑。
+
+**`d` 远端端口发现**:`ss -tlnH` → 降级 `netstat -tln`。loopback-only 排前高亮。
+选中 `Enter` 直接起、`s` 存进档案。`-R` 方向对称,扫**本地**监听端口。
+
+### 5.6 ssh config 编辑器
+
+**编辑全部在 TUI 内完成。** 明确否掉外部编辑器路线(`$EDITOR` / `code -g`):
+excalibur 的目的之一就是不必开 VS Code,拿它当逃生舱是自相矛盾;且 `EDITOR=nano`。
+反过来说这条更成立:本机 `~/.config/nvim` 为空 —— 现有编辑器**没有一个**能给
+ssh_config 提供指令补全、语法校验、遮蔽检测,专用 TUI 编辑器在这个文件上确实更好。
+
+**主路径 = 把 config 解构成结构化表单(网页表单式);直接改原文是补充。**
+
+表单字段按**实际用量**选,不按 ssh_config 支持什么选(2026-08-29 复核 35 个块):
+
+| 指令 | 次数 | 进表单? |
+|---|---|---|
+| `Port` | 35 | ✅ 数字 |
+| `HostName` | 35 | ✅ 短文本 + 历史值补全 |
+| `User` | 34 | ✅ 5 选 1(`lxb`/`root`/`wonder`/`deployer`/`nixos`) |
+| `ProxyCommand`(跳板) | 6 | ✅ 从 35 个 alias 里选 |
+| `IdentityFile` | 4 | ✅ 从 `~/.ssh` + 历史值里选 |
+| `ServerAliveInterval` / `CountMax` | 3 / 3 | ❌ 落到「其他指令」 |
+| `StrictHostKeyChecking` / `IdentitiesOnly` | 1 / 1 | ❌ 同上 |
+
+**别名 + 这 5 个字段完整覆盖 35 个块里的 32 个**。例外只有 `gxzq`(5 条)、
+`guosen-trade-1`(6 条)、`windows-via-reverse`(8 条),且其余指令都是「设一次不再动」
+的类型。块内指令数分布:25 个块 3 条、7 个块 4 条 —— 表单是主路径,有数据撑着。
+
+**第 1 层 · 表单**(主路径,零自由文本输入):
+
+```
+┌ 编辑 host ─────────────────────────┐
+│  别名          kami                │
+│  HostName      192.168.110.134     │
+│  User          lxb             ▾   │
+│  Port          22                  │
+│  跳板          (无)            ▾   │
+│  IdentityFile  (无)            ▾   │
+│  ────────────────────────────────  │
+│  其他指令 (0)                  ▸   │
+└────────────────────────────────────┘
+ j/k 切字段 · Enter 编辑 · ▾ 候选下拉 · Ctrl+S 保存 · Tab 切原文
+```
+
+**第 2 层 · 原文块编辑**(**补充**,`Tab` 切入)。编辑框里只有选中 host 那几行,
+不是整个 191 行文件 —— 装得下、上下文清楚、保存时只替换该行区间。给的是现有
+编辑器都没有的:
+
+- 指令名补全(~80 个 OpenSSH 关键字,`ServerAliveCountMax` 这类没人记得住拼写)
+- 值补全(`IdentityFile` 补 `~/.ssh` 下文件、`ProxyJump` 补已有 alias)
+- 逐键校验,错误行当场标红
+- undo/redo、词级移动、搜索(crate 的 `search` feature)
+- 键位用 crate 默认(emacs 风),**不自写 vim 模态状态机**(见 §5.10)
+
+> ⚠️ **表单存盘必须原样保留它不覆盖的指令。** `windows-via-reverse` 有 5 条表单外
+> 指令;若表单按字段整块重写,这些指令会**静默消失** —— ssh 行为的变化要过很久
+> 才会被发现。实现约束:表单只改它对应的那几行,其余行原样不动。
+
+**信任机制:**
+
+- 实时 diff 预览 —— 存盘前看到确切要写的行
+- **遮蔽检测** —— 行 60 的 `Host kami` 标灰 + 「被行 6 遮蔽」
+- `g` → `ssh -G <alias>` 对照 OpenSSH 实际解析出的生效值
+- 原子写(临时文件 + rename)+ 自动备份 3 份 + session 内 undo + 存前语法校验
+
+### 5.7 转发配置
+
+存 `~/.config/excalibur/tunnels.yaml`(serde_yaml 已在依赖里,目录需新建)。
+**不写进 `~/.ssh/config`** —— 那里的 `LocalForward` 语义是「每次 ssh 该 host 自动带上」,
+与「我启动它才起」不同,别混。
+
+```yaml
+profiles:
+  - name: 日常
+    forwards:
+      - host: xx-database-1
+        kind: local          # local | remote
+        bind: 29001
+        target: 0.0.0.0:9001
+        note: minio console
+```
+
+5 个字段全是选择或数字(host 从 35 个 alias 选、方向二选一、端口是数字、
+target 从端口发现结果里选),第 1 层表单即可;`Tab` 切 textarea 编辑整段 yaml 备用。
+
+### 5.8 模块结构
 
 ```
 excalibur/src/modules/ssh/
-├── mod.rs       # SshModule,实现 Module trait,路由主机列表 / 路径浏览 两个模式
-├── state.rs     # 主机列表、选中、当前远端路径栈、overlay 存储、端口探测结果
-├── ui.rs        # 主机列表 / 远端目录面板 / 端口状态
-├── discovery.rs # 解析 ~/.ssh/config + tailscale status(只读)
-├── browse.rs    # 远端目录列举(ssh ls),路径栈进入 / 返回
-└── probe.rs     # 原生 TCP 端口探测
+├── mod.rs         # SshModule + Screen 路由(Menu / Config / Forward / Dashboard)
+├── state.rs       # 各屏状态、选中、探测结果缓存
+├── ui.rs          # 按 Screen 分发渲染(超 ~500 行再拆)
+├── sshconfig.rs   # ~/.ssh/config 解析:alias / 起止行号 / 字段 / 跳板 / 遮蔽
+├── tunnels.rs     # tunnels.yaml serde 读写
+├── supervisor.rs  # 起(-f -N) / 停(按 pid) / procfs 认领
+└── probe.rs       # ②绑定 ③端到端 + 后台探测线程
 ```
 
-### 5.5 实现步骤
+新增依赖:`tui-textarea = { version = "0.7", features = ["search"] }`
+(已验证与 ratatui 0.29 + crossterm 0.28 兼容)。
+
+CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
+
+### 5.9 实现步骤
 
 ```
-1. 脚手架 ModuleId::Ssh + 模块目录 + manager/CLI/菜单 注册
-   → 验证:`ex ssh` 打开空模块
-2. 主机发现:解析 ~/.ssh/config Host 块(+ tailscale status)
-   → 验证:真实主机(zeus/thor/hades/sol/mani/fama + 100.x)渲染成模糊可搜列表
-3. 远端路径浏览器:选中主机 → ssh ls 列目录 → 进入 / 返回 / fuzzy 过滤
-   → 验证:能一路点进 kami:/var/lib/wonder/warehouse/database/twl/…
-4. 传输:`t` → Output `rsync -av --checksum --progress <host>:<选中路径> ./`
-   → 验证:吐回命令行且可改
-5. 端口探测:`p` → 原生 TCP 探测,绿/红显示
-   → 验证:对某主机一排端口状态正确
-6. .claude/rules/ssh.md + 更新 CLAUDE.md 模块表
+1. 脚手架:ModuleId::Ssh + 目录 + manager/CLI 注册 + 入口菜单三项(预览留空)
+   → 验证:ex ssh 显示菜单,j/k 能动
+2. sshconfig.rs 解析
+   → 验证:35 个 host 全出;6 个 ⤳ 标对(含 ProxyCommand -W 反解);
+           kami 的行 60 标出「被行 6 遮蔽」;xx-trade-wsl1 的尾空格不炸
+3. 子视图 1:host 列表 + fuzzy + 结构化表单(6 字段 + 候选下拉)+ diff 预览 + 原子写/备份
+   → 验证:改 kami 的 Port,diff 只有 1 行,其余 190 行字节不动;
+           改 windows-via-reverse 的 Port,它那 5 条表单外指令一条不少
+3b. Tab 切 tui-textarea 块内编辑(crate 默认键位)+ 补全 + 逐键校验
+   → 验证:块内加一行 ServerAliveInterval 30 存盘,其余 190 行字节不动
+3c. g → ssh -G 生效值对照
+   → 验证:kami 显示行 60 被遮蔽
+4. tunnels.rs + 子视图 2 编辑
+   → 验证:新建一条转发存盘,重进能读回
+5. supervisor.rs:procfs 认领 + 起/停
+   → 验证:手动开一条 ssh -N -L → ①灯亮;TUI 里起停;
+           退出 TUI 隧道仍活,重进仍认得
+6. probe.rs:②③ 灯 + 后台线程
+   → 验证:占住 bind 端口再起 → ①绿②红;停掉远端服务 → ①②绿③红
+7. 仪表盘 a 全起 / A 全停 + 菜单第 3 项预览摘要
+   → 验证:一键拉起整个「日常」档案
+8. d 远端端口发现(ss → netstat 降级,loopback 高亮)
+   → 验证:对 xx-database-1 列出监听端口,选一个直接起
+9. n 新建(三模板) / c 克隆(追加到文件末尾)
+   → 验证:克隆 xx-trade-wsl1 改端口,diff 只有末尾新增
+10. sparkline(/proc/<pid>/io;读前先比对 argv 确认 pid 属于目标隧道)
+11. .claude/rules/ssh.md + CLAUDE.md 模块表
 ```
 
-### 5.6 待定
+风险点:2(脏 config 解析 + 遮蔽)、5(argv 认领)、6(三层灯语义)。
 
-- 远端 `ls` 的延迟:每层目录一次 ssh 往返可能慢。备选是复用一条 ControlMaster
-  连接,或一次性 `find -maxdepth N`。**等步骤 3 实测再决定,不预先优化。**
+### 5.10 明确砍掉的(以及为什么)
+
+| 砍掉 | 理由 |
+|---|---|
+| 无损 CST parser | 只替换目标 host 的行区间即可,其余字节天然不动。CST 是「整文件重生成」路线才需要的 |
+| `$EDITOR` / `code -g` 逃生舱 | 与「不必开 VS Code」的目的自相矛盾;且第 2 层能编辑任意内容,没有兜不住的情况 |
+| `ModuleAction::Suspend` | 上条的连带 —— 不再需要挂起终端,**零 core 改动** |
+| vim 模态状态机(~200 行) | 块内自由文本编辑**不是常用场景** —— 日常改 config 落在第 1 层表单(选择/数字),原文编辑只是补充。用 crate 默认键位即可;半吊子 vim 比没有 vim 更烦 |
+| home-manager 声明式生成 | 能消除重复块/重复劳动整类问题,但 config 变只读、改配置要 rebuild,失去手改敏捷性 |
+| tunnels 的 JSON Schema + LSP | 同样基于 VS Code,一并撤 |
+| `-D` SOCKS | history 里 0 次使用 |
+| 自动重连 | 引入后台循环,且「它怎么自己又起来了」很困惑。红灯 + 一键重起够用 |
+| 模块内起前台隧道 / 完整生命周期管理 | `-f` detach + procfs 认领已覆盖,不必持有子进程状态 |
+
+### 5.11 后续:远端路径浏览器(原设计,降级保留)
+
+§2.3 的定量依据仍然成立(fish 对远端路径零补全,`__rsync_remote_target` 只回显;
+104 条 rsync 全不重复)。选主机 → `ssh ls` 走目录树 → `t` 吐 rsync 拉取行。
+它与本节共用 `sshconfig.rs` 的主机发现,等 §5.9 跑完再排期。
+
+待定:远端 `ls` 的延迟(每层一次 ssh 往返)。备选复用 ControlMaster 或一次性
+`find -maxdepth N`。**实测再决定,不预先优化。**
 
 ---
 
