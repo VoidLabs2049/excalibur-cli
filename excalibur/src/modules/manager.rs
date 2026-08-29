@@ -1,6 +1,5 @@
 use super::{
-    Module, ModuleAction, ModuleId, ModuleMetadata, history::HistoryModule,
-    settings::SettingsModule, ssh::SshModule,
+    Module, ModuleAction, ModuleId, ModuleMetadata, history::HistoryModule, ssh::SshModule,
 };
 #[cfg(target_os = "linux")]
 use super::proctrace::ProcessTracerModule;
@@ -30,10 +29,6 @@ impl ModuleManager {
             let proctrace = ProcessTracerModule::new();
             modules.insert(ModuleId::ProcessTracer, Box::new(proctrace));
         }
-
-        // Register settings module
-        let settings = SettingsModule::new();
-        modules.insert(ModuleId::Settings, Box::new(settings));
 
         // Register ssh module
         let ssh = SshModule::new();

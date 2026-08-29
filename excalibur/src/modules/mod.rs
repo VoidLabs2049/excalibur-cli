@@ -2,7 +2,6 @@ pub mod history;
 pub mod manager;
 #[cfg(target_os = "linux")]
 pub mod proctrace;
-pub mod settings;
 pub mod ssh;
 
 use color_eyre::Result;
@@ -14,7 +13,6 @@ pub enum ModuleId {
     History,
     #[cfg(target_os = "linux")]
     ProcessTracer,
-    Settings,
     Ssh,
 }
 
@@ -26,7 +24,6 @@ impl ModuleId {
             "history" | "h" => Some(ModuleId::History),
             #[cfg(target_os = "linux")]
             "proctrace" | "pt" => Some(ModuleId::ProcessTracer),
-            "settings" | "s" => Some(ModuleId::Settings),
             "ssh" | "t" => Some(ModuleId::Ssh),
             _ => None,
         }

@@ -213,12 +213,6 @@ impl HistoryState {
         self.table_state.select(Some(self.selected_index));
     }
 
-    /// Update search query
-    pub fn update_search(&mut self, query: String) {
-        self.search_query = query;
-        self.apply_filters();
-    }
-
     /// Cycle to the next sort mode
     pub fn cycle_sort_mode(&mut self) {
         self.sort_mode = self.sort_mode.next();

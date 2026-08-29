@@ -129,16 +129,6 @@ impl ProcessTracerState {
         }
     }
 
-    /// Scroll details panel up
-    pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-    }
-
-    /// Scroll details panel down
-    pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
-    }
-
     /// Page up (10 lines)
     pub fn page_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(10);

@@ -28,10 +28,6 @@ enum Commands {
     #[command(visible_alias = "pt")]
     ProcessTracer,
 
-    /// Switch Claude Code settings profiles
-    #[command(visible_alias = "s")]
-    Settings,
-
     /// Manage ssh config and port-forward tunnels
     #[command(visible_alias = "t")]
     Ssh,
@@ -48,7 +44,6 @@ fn main() -> color_eyre::Result<()> {
         Some(Commands::History) => Some(ModuleId::History),
         #[cfg(target_os = "linux")]
         Some(Commands::ProcessTracer) => Some(ModuleId::ProcessTracer),
-        Some(Commands::Settings) => Some(ModuleId::Settings),
         Some(Commands::Ssh) => Some(ModuleId::Ssh),
         None => None,
     };

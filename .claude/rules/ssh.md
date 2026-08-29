@@ -21,7 +21,7 @@ Design rationale, the quantitative basis for the field choices, the backlog, and
 what was deliberately cut: `docs/ssh.md`. This file is the map; that one is the
 argument.
 
-CLI: `cargo run -- ssh`, alias `t` (`s` was taken by settings).
+CLI: `cargo run -- ssh`, alias `t`.
 
 ## Key Files
 

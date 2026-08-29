@@ -7,8 +7,8 @@
 #   exit 10 -> insert and execute immediately
 #
 # This is the single place that knows the exit-code protocol. Per-module
-# wrappers (exh, excc) are thin aliases over it; new modules need no new
-# fish function at all -- `ex pt`, `ex s`, ... just work.
+# wrappers (exh) are thin aliases over it; new modules need no new
+# fish function at all -- `ex pt`, `ex t`, ... just work.
 
 function ex --description "Run an Excalibur module and apply its emitted command"
     set -l emitted (command excalibur $argv 2>/dev/null)

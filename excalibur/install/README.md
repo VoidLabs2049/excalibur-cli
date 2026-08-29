@@ -6,10 +6,9 @@ This directory contains the Fish shell integration for Excalibur.
 |------|----------|------|
 | `ex.fish` | `ex <module>` | Generic wrapper — owns the exit-code protocol. Works for every module. |
 | `exh.fish` | `exh` | Alias for `ex h`, plus the `Ctrl+R` binding |
-| `excc.fish` | `excc` | Alias for `ex s` |
 
 `ex` is the only place that knows the protocol, so a new module needs no new
-fish function — `ex pt`, `ex s`, … just work.
+fish function — `ex pt`, `ex t`, … just work.
 
 ## Installation
 
@@ -24,8 +23,8 @@ cargo install --path .
 ### Step 2: Install Fish Functions
 
 ```bash
-# ex.fish is required; the others are optional conveniences
-cp ex.fish exh.fish excc.fish ~/.config/fish/functions/
+# ex.fish is required; exh.fish is an optional convenience
+cp ex.fish exh.fish ~/.config/fish/functions/
 
 # Reload Fish configuration
 source ~/.config/fish/config.fish
@@ -40,7 +39,7 @@ source ~/.config/fish/config.fish
 ```fish
 ex h     # or the alias: exh
 ex pt    # process tracer — emits kill / journalctl / systemctl / cd
-ex s     # or the alias: excc
+ex t     # ssh tunnel dashboard + config editor
 ```
 
 ### Method 2: Keybinding

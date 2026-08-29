@@ -19,7 +19,6 @@ pub enum ProcessWarning {
     HighCpu { percent: f32 },
     HighMemory { gb: f64 },
     LongUptime { days: u64 },
-    PublicBinding { port: u16, protocol: String },
 }
 
 impl ProcessWarning {
@@ -30,7 +29,6 @@ impl ProcessWarning {
             ProcessWarning::HighCpu { .. } => "⚠ HIGH_CPU",
             ProcessWarning::HighMemory { .. } => "⚠ HIGH_MEM",
             ProcessWarning::LongUptime { .. } => "⚠ LONG_UPTIME",
-            ProcessWarning::PublicBinding { .. } => "⚠ PUBLIC",
         }
     }
 
@@ -41,9 +39,6 @@ impl ProcessWarning {
             ProcessWarning::HighCpu { percent } => format!("High CPU usage: {:.1}%", percent),
             ProcessWarning::HighMemory { gb } => format!("High memory usage: {:.1} GB", gb),
             ProcessWarning::LongUptime { days } => format!("Long uptime: {} days", days),
-            ProcessWarning::PublicBinding { port, protocol } => {
-                format!("Public binding: {}:{}", protocol, port)
-            }
         }
     }
 
@@ -55,7 +50,6 @@ impl ProcessWarning {
             ProcessWarning::HighCpu { .. } => Color::Yellow,
             ProcessWarning::HighMemory { .. } => Color::Yellow,
             ProcessWarning::LongUptime { .. } => Color::Cyan,
-            ProcessWarning::PublicBinding { .. } => Color::Red,
         }
     }
 }

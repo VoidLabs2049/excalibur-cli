@@ -17,7 +17,7 @@ Application framework: TUI shell, event loop, module system, and main menu rende
 
 | File | Role |
 |------|------|
-| `excalibur/src/main.rs` | CLI entry point (clap), terminal setup, optional direct module entry via subcommands (`history`/`h`, `process-tracer`/`pt`, `settings`/`s`) |
+| `excalibur/src/main.rs` | CLI entry point (clap), terminal setup, optional direct module entry via subcommands (`history`/`h`, `process-tracer`/`pt`, `ssh`/`t`) |
 | `excalibur/src/app.rs` | `App` struct — main event loop, key dispatch, `ModuleAction` handling (Output/OutputAndExecute exit codes) |
 | `excalibur/src/event.rs` | `EventHandler` — mpsc channel, background thread emitting `Tick` (30 FPS) and `Crossterm` events, plus `AppEvent` queue |
 | `excalibur/src/view.rs` | `View` enum: `MainMenu` or `Module(ModuleId)` |
@@ -47,7 +47,7 @@ main.rs (clap parse → terminal setup)
 
 - **Module trait**: All modules implement `Module` (metadata, init, handle_key_event, update, render, cleanup)
 - **Event channel**: mpsc sender/receiver decouples input thread from app logic; `AppEvent` allows deferred actions
-- **Exit codes for shell integration**: `ModuleAction::Output` → exit(0), `OutputAndExecute` → exit(10); stdout carries the command, TUI uses `/dev/tty`. The fish side of this protocol lives in **one** place — `install/ex.fish` (`ex <module>`); `exh`/`excc` are thin aliases over it, so a new module needs no new fish function.
+- **Exit codes for shell integration**: `ModuleAction::Output` → exit(0), `OutputAndExecute` → exit(10); stdout carries the command, TUI uses `/dev/tty`. The fish side of this protocol lives in **one** place — `install/ex.fish` (`ex <module>`); `exh` is a thin alias over it, so a new module needs no new fish function.
 - **Platform gating**: the `proctrace` module is `#[cfg(target_os = "linux")]`-only — the `ModuleId::ProcessTracer` variant, its `manager.rs` registration, the `main.rs` subcommand, and `ModuleId::from_command_name()` arm all compile out off Linux
 
 ## How to Extend

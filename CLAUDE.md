@@ -10,7 +10,6 @@ cargo build --release
 cargo run                    # main menu
 cargo run -- history         # direct module entry
 cargo run -- process-tracer  # direct module entry
-cargo run -- settings        # direct module entry
 cargo run -- ssh             # direct module entry
 ```
 
@@ -29,15 +28,14 @@ excalibur/
 │       ├── manager.rs   # ModuleManager (registry, routing)
 │       ├── history/     # Fish shell history browser
 │       ├── proctrace/   # Process tracer/analyzer (Linux-only, cfg-gated)
-│       ├── settings/    # Claude Code settings manager
 │       └── ssh/         # Tunnel dashboard + ssh config editor
-└── install/             # Fish shell integration (ex.fish + exh/excc aliases)
+└── install/             # Fish shell integration (ex.fish + exh alias)
 ```
 
 `install/ex.fish` defines `ex <module>` and is the single owner of the exit-code
 protocol (exit 0 → insert into the command line, exit 10 → insert and execute).
-`exh` (bound to Ctrl+R) and `excc` are thin aliases over it, so a new module needs
-no new fish function.
+`exh` (bound to Ctrl+R) is a thin alias over it, so a new module needs no new
+fish function.
 
 `proctrace` is gated behind `#[cfg(target_os = "linux")]` — the module, its `ModuleId` variant, manager registration, and the `process-tracer` subcommand all compile out off Linux. `ssh` also reads `/proc`, but only `supervisor::scan()` is cfg-gated: elsewhere it returns an empty list, so the module still builds and shows every tunnel as stopped.
 
@@ -48,7 +46,6 @@ no new fish function.
 | core | `.claude/rules/core.md` | App framework: event loop, module system, main menu |
 | history | `.claude/rules/history.md` | Fish shell history browser with search, sort, clipboard |
 | proctrace | `.claude/rules/proctrace.md` | Query-driven process inspector (name/PID/port), Linux-only; emits kill/journalctl/systemctl/cd |
-| settings | `.claude/rules/settings.md` | Claude Code settings profile manager: switch, copy, rename, delete, JSON key-value editor |
 | ssh | `.claude/rules/ssh.md` | Port-forward dashboard (three connectivity layers) + structured `~/.ssh/config` editor |
 
 ## Design docs

@@ -1,21 +1,12 @@
 use color_eyre::Result;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 /// Network protocol
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Protocol {
     Tcp,
     Udp,
-}
-
-impl Protocol {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Protocol::Tcp => "TCP",
-            Protocol::Udp => "UDP",
-        }
-    }
 }
 
 /// Connection state
@@ -26,18 +17,6 @@ pub enum ConnectionState {
     TimeWait,
     CloseWait,
     Unknown,
-}
-
-impl ConnectionState {
-    pub fn as_str(&self) -> &str {
-        match self {
-            ConnectionState::Listen => "LISTEN",
-            ConnectionState::Established => "ESTABLISHED",
-            ConnectionState::TimeWait => "TIME_WAIT",
-            ConnectionState::CloseWait => "CLOSE_WAIT",
-            ConnectionState::Unknown => "UNKNOWN",
-        }
-    }
 }
 
 /// Network binding information
@@ -134,8 +113,8 @@ fn parse_state(hex_str: &str) -> ConnectionState {
     }
 }
 
-/// Map network connections to PIDs by matching socket inodes
-pub fn map_connections_to_pids(connections: &[NetworkBinding]) -> Result<HashMap<u64, u32>> {
+/// Map socket inodes to the PIDs holding them, by scanning /proc/[pid]/fd
+pub fn map_connections_to_pids() -> Result<HashMap<u64, u32>> {
     let mut inode_to_pid = HashMap::new();
 
     // Get all process PIDs
@@ -189,7 +168,7 @@ pub fn find_process_by_port(port: u16) -> Result<Option<u32>> {
     }
 
     // Build inode → PID mapping
-    let inode_map = map_connections_to_pids(&all_conns)?;
+    let inode_map = map_connections_to_pids()?;
 
     // Find first match
     for conn in listening {
@@ -208,7 +187,7 @@ pub fn get_process_bindings(pid: u32) -> Result<Vec<NetworkBinding>> {
     all_conns.extend(parse_udp_connections()?);
 
     // Build inode → PID mapping
-    let inode_map = map_connections_to_pids(&all_conns)?;
+    let inode_map = map_connections_to_pids()?;
 
     // Filter connections for this PID
     let bindings: Vec<_> = all_conns

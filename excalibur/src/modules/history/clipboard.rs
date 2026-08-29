@@ -34,11 +34,6 @@ impl ClipboardManager {
             ))
         }
     }
-
-    /// Check if clipboard is available
-    pub fn is_available(&self) -> bool {
-        self.clipboard.is_some()
-    }
 }
 
 impl Default for ClipboardManager {

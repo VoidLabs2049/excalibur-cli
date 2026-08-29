@@ -39,12 +39,10 @@ impl CommandEntry {
     }
 }
 
-/// Statistics for a command (first/last usage)
+/// Statistics for a command (first usage)
 #[derive(Debug, Clone)]
 pub struct HistoryStats {
     pub first_used: i64,
-    pub last_used: i64,
-    pub total_count: usize,
 }
 
 /// Raw entry from Fish history file
@@ -206,15 +204,7 @@ impl FishHistoryParser {
             .into_iter()
             .map(|(cmd, timestamps)| {
                 let first = *timestamps.iter().min().unwrap_or(&0);
-                let last = *timestamps.iter().max().unwrap_or(&0);
-                (
-                    cmd,
-                    HistoryStats {
-                        first_used: first,
-                        last_used: last,
-                        total_count: timestamps.len(),
-                    },
-                )
+                (cmd, HistoryStats { first_used: first })
             })
             .collect();
 
