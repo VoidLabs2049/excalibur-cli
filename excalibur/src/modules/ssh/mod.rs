@@ -2,6 +2,7 @@ mod effective;
 mod form;
 mod sshconfig;
 mod state;
+mod supervisor;
 mod tunnels;
 mod ui;
 

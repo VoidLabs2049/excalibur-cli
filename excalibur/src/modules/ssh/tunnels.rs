@@ -67,6 +67,10 @@ impl Forward {
             "BatchMode=yes".into(),
             "-o".into(),
             "ExitOnForwardFailure=yes".into(),
+            // Bounds how long an unreachable host can hold the worker; without
+            // it ssh waits out the full TCP connect timeout.
+            "-o".into(),
+            "ConnectTimeout=10".into(),
             self.kind.flag().into(),
             self.spec(),
             self.host.clone(),
@@ -186,7 +190,7 @@ mod tests {
         assert_eq!(
             local().command_line(),
             "ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
-             -L 29001:0.0.0.0:9001 xx-database-1"
+             -o ConnectTimeout=10 -L 29001:0.0.0.0:9001 xx-database-1"
         );
     }
 
