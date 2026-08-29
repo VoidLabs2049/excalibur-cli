@@ -220,8 +220,8 @@ impl SshState {
             return;
         };
         let forward = form.to_forward();
-        if forward.host.is_empty() || forward.bind.is_empty() || forward.target.is_empty() {
-            self.notify("Host, listen and exit are all required");
+        if let Some(problem) = forward.problem() {
+            self.notify(problem);
             return;
         }
         let (profile, index) = (form.profile, form.index);
@@ -489,6 +489,12 @@ impl SshState {
                 let Some(forward) = self.tunnels.get(slot.0, slot.1).cloned() else {
                     return;
                 };
+                // Say why up front rather than relaying ssh's complaint about a
+                // malformed forward specification.
+                if let Some(problem) = forward.problem() {
+                    self.notify(problem);
+                    return;
+                }
                 self.worker.submit(Job::Start(slot, forward));
                 self.notify("Starting");
             }
@@ -496,20 +502,28 @@ impl SshState {
     }
 
     pub fn start_all(&mut self) {
-        let mut queued = 0;
+        let (mut queued, mut skipped) = (0, 0);
         for slot in self.tunnels.all() {
             if self.pid_at(slot).is_some() {
                 continue;
             }
-            if let Some(forward) = self.tunnels.get(slot.0, slot.1).cloned() {
-                self.worker.submit(Job::Start(slot, forward));
-                queued += 1;
+            let Some(forward) = self.tunnels.get(slot.0, slot.1).cloned() else {
+                continue;
+            };
+            if forward.problem().is_some() {
+                skipped += 1;
+                continue;
             }
+            self.worker.submit(Job::Start(slot, forward));
+            queued += 1;
         }
-        self.notify(if queued == 0 {
-            "Everything is already up".to_string()
-        } else {
-            format!("Starting {queued}")
+        // Never silently drop one: a rule that is simply skipped reads as a rule
+        // that failed for no reason.
+        self.notify(match (queued, skipped) {
+            (0, 0) => "Everything is already up".to_string(),
+            (0, s) => format!("{s} rule(s) are incomplete; nothing to start"),
+            (q, 0) => format!("Starting {q}"),
+            (q, s) => format!("Starting {q}, skipped {s} incomplete"),
         });
     }
 

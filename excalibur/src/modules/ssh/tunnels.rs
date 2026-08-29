@@ -81,18 +81,30 @@ impl Forward {
         format!("ssh {}", self.ssh_args().join(" "))
     }
 
-    /// Where the port opens and where traffic leaves, in that order. The two
-    /// swap sides between `-L` and `-R`; saying it outright is the whole point.
+    /// Where the port opens and where traffic leaves, in that order.
+    ///
+    /// Both the side that listens and the side the exit is *resolved from* swap
+    /// between `-L` and `-R`, and the second is the part the syntax hides: in
+    /// `-L 29001:10.0.0.5:9001 kami` it is kami that connects to 10.0.0.5, so
+    /// the exit may name anything kami can reach and nothing this machine can.
     pub fn explain(&self) -> (String, String) {
         match self.kind {
             Kind::Local => (
-                format!("listen   this machine   {}", self.bind),
-                format!("exit     {}   ->  {}", self.host, self.target),
+                format!("listen   here             {}", self.bind),
+                format!("exit     from {}   {}", self.host, self.target),
             ),
             Kind::Remote => (
-                format!("listen   {}   {}", self.host, self.bind),
-                format!("exit     this machine   ->  {}", self.target),
+                format!("listen   on {}      {}", self.host, self.bind),
+                format!("exit     from here       {}", self.target),
             ),
+        }
+    }
+
+    /// The side that resolves the exit address.
+    pub fn exit_resolved_from(&self) -> String {
+        match self.kind {
+            Kind::Local => self.host.clone(),
+            Kind::Remote => "this machine".to_string(),
         }
     }
 
@@ -100,6 +112,63 @@ impl Forward {
     pub fn summary(&self) -> String {
         format!("{} {} {}", self.kind.flag(), self.spec(), self.host)
     }
+
+    /// Why ssh would reject this rule, if it would.
+    ///
+    /// The exit is the trap: `-L` takes `port:host:hostport`, so an exit written
+    /// as a bare port produces `-L 22:6022`, which ssh refuses. Nothing about
+    /// the field says it needs two parts, so it is checked here instead.
+    pub fn problem(&self) -> Option<String> {
+        if self.host.trim().is_empty() {
+            return Some("host is required".into());
+        }
+        if self.bind.trim().is_empty() {
+            return Some("listen side is required".into());
+        }
+        if port_of(&self.bind).is_none() {
+            return Some(format!(
+                "`{}` is not a port -- use `8080` or `0.0.0.0:8080`",
+                self.bind
+            ));
+        }
+        let target = self.target.trim();
+        if target.is_empty() {
+            return Some("exit side is required".into());
+        }
+        if !target.contains(':') {
+            return Some(format!(
+                "exit needs a host too: `localhost:{target}` for {} itself, or any \
+                 address {} can reach",
+                self.exit_resolved_from(),
+                self.exit_resolved_from()
+            ));
+        }
+        if port_of(target).is_none() {
+            return Some(format!("`{target}` does not end in a port"));
+        }
+        None
+    }
+
+    /// A bare port typed into the exit field, expanded to the host ssh needs.
+    /// Applied on commit so the field visibly changes rather than the command
+    /// quietly differing from what was typed.
+    pub fn normalise_target(value: &str) -> String {
+        let value = value.trim();
+        match value.parse::<u16>() {
+            Ok(port) => format!("localhost:{port}"),
+            Err(_) => value.to_string(),
+        }
+    }
+
+    /// Ports below 1024 need root to bind. Not an error -- excalibur may well be
+    /// run as root -- but the failure is otherwise a bare "permission denied".
+    pub fn privileged_bind(&self) -> Option<u16> {
+        port_of(&self.bind).filter(|p| *p < 1024 && self.kind == Kind::Local)
+    }
+}
+
+fn port_of(spec: &str) -> Option<u16> {
+    spec.rsplit(':').next()?.trim().parse().ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,16 +269,50 @@ mod tests {
     }
 
     #[test]
-    fn the_listening_side_swaps_between_the_two_directions() {
-        // The one thing that has to be right: -L opens the port here, -R opens
-        // it on the far side.
+    fn both_the_listening_side_and_the_exit_side_swap() {
+        // -L opens the port here and the far side resolves the exit; -R is the
+        // mirror. The second half is what the flag syntax hides: in
+        // `-L 29001:10.0.0.5:9001 kami` it is kami that connects to 10.0.0.5.
         let (listen, exit) = local().explain();
-        assert!(listen.contains("this machine"));
-        assert!(exit.contains("xx-database-1"));
+        assert!(listen.contains("here"), "got: {listen}");
+        assert!(exit.contains("from xx-database-1"), "got: {exit}");
+        assert_eq!(local().exit_resolved_from(), "xx-database-1");
 
         let (listen, exit) = remote().explain();
-        assert!(listen.contains("xx-database-1"));
-        assert!(exit.contains("this machine"));
+        assert!(listen.contains("on xx-database-1"), "got: {listen}");
+        assert!(exit.contains("from here"), "got: {exit}");
+        assert_eq!(remote().exit_resolved_from(), "this machine");
+    }
+
+    #[test]
+    fn an_exit_the_far_side_can_reach_is_a_normal_rule() {
+        // Using kami as a jump host to reach something only kami can see.
+        let through_a_jump_host = Forward {
+            host: "kami".into(),
+            kind: Kind::Local,
+            bind: "29001".into(),
+            target: "10.0.0.5:9001".into(),
+            note: String::new(),
+        };
+        assert_eq!(through_a_jump_host.problem(), None);
+        assert!(
+            through_a_jump_host
+                .command_line()
+                .contains("-L 29001:10.0.0.5:9001 kami")
+        );
+    }
+
+    #[test]
+    fn the_missing_host_message_names_the_side_that_resolves_it() {
+        let rule = Forward {
+            host: "kami".into(),
+            kind: Kind::Local,
+            bind: "29001".into(),
+            target: "9001".into(),
+            note: String::new(),
+        };
+        let problem = rule.problem().unwrap();
+        assert!(problem.contains("kami"), "got: {problem}");
     }
 
     #[test]
@@ -259,5 +362,84 @@ mod tests {
         };
         assert_eq!(tunnels.all(), [(0, 0), (1, 0), (1, 1)]);
         assert_eq!(tunnels.count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod validation {
+    use super::*;
+
+    fn rule(bind: &str, target: &str) -> Forward {
+        Forward {
+            host: "kami".into(),
+            kind: Kind::Local,
+            bind: bind.into(),
+            target: target.into(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_bare_port_as_the_exit_is_rejected_with_the_fix_spelled_out() {
+        // The rule the author actually wrote: `-L 22:6022 kami`, which ssh
+        // refuses because the exit has no host.
+        let problem = rule("22", "6022").problem().unwrap();
+        assert!(problem.contains("localhost:6022"), "got: {problem}");
+    }
+
+    #[test]
+    fn a_complete_rule_has_no_problem() {
+        assert_eq!(rule("29001", "0.0.0.0:9001").problem(), None);
+        assert_eq!(rule("0.0.0.0:29001", "localhost:9001").problem(), None);
+    }
+
+    #[test]
+    fn missing_pieces_are_named_individually() {
+        assert!(
+            rule("", "localhost:1")
+                .problem()
+                .unwrap()
+                .contains("listen")
+        );
+        assert!(rule("1", "").problem().unwrap().contains("exit"));
+
+        let mut hostless = rule("1", "localhost:1");
+        hostless.host = String::new();
+        assert!(hostless.problem().unwrap().contains("host"));
+    }
+
+    #[test]
+    fn a_non_numeric_port_is_caught_on_either_side() {
+        assert!(rule("http", "localhost:1").problem().is_some());
+        assert!(rule("1", "localhost:http").problem().is_some());
+    }
+
+    #[test]
+    fn a_bare_port_expands_to_localhost() {
+        assert_eq!(Forward::normalise_target("6022"), "localhost:6022");
+        assert_eq!(Forward::normalise_target(" 9001 "), "localhost:9001");
+    }
+
+    #[test]
+    fn an_exit_that_already_names_a_host_is_left_alone() {
+        assert_eq!(Forward::normalise_target("0.0.0.0:9001"), "0.0.0.0:9001");
+        assert_eq!(
+            Forward::normalise_target("db.internal:5432"),
+            "db.internal:5432"
+        );
+    }
+
+    #[test]
+    fn a_privileged_local_bind_is_flagged() {
+        assert_eq!(rule("22", "localhost:6022").privileged_bind(), Some(22));
+        assert_eq!(rule("29001", "localhost:6022").privileged_bind(), None);
+    }
+
+    #[test]
+    fn a_remote_bind_below_1024_is_not_our_problem() {
+        // The far side binds it, so local privileges do not decide.
+        let mut remote = rule("80", "localhost:8080");
+        remote.kind = Kind::Remote;
+        assert_eq!(remote.privileged_bind(), None);
     }
 }

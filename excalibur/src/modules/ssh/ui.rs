@@ -759,7 +759,10 @@ fn render_forward_form(form: &ForwardForm, area: Rect, buf: &mut Buffer) {
         }
         let value = &form.values[i];
         let (text, style) = if value.is_empty() {
-            ("(empty)".to_string(), Style::default().fg(Color::DarkGray))
+            (
+                field.placeholder().to_string(),
+                Style::default().fg(Color::DarkGray),
+            )
         } else {
             (value.clone(), Style::default())
         };
@@ -778,24 +781,43 @@ fn render_forward_form(form: &ForwardForm, area: Rect, buf: &mut Buffer) {
     }
 }
 
-/// Direction diagram plus the command it becomes.
+/// Why the rule cannot run, if it cannot, then the direction diagram, then the
+/// command. The problem comes first because it is the only line that must not
+/// be the one clipped when the pane is short.
 fn forward_explainer(forward: &Forward) -> Vec<Line<'static>> {
-    let (listen, exit) = forward.explain();
-    vec![
-        Line::from(Span::styled(
-            format!("  {listen}"),
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            format!("  {exit}"),
+    let mut lines = Vec::new();
+    if let Some(problem) = forward.problem() {
+        lines.push(Line::from(Span::styled(
+            format!("  {problem}"),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+    } else if let Some(port) = forward.privileged_bind() {
+        lines.push(Line::from(Span::styled(
+            format!("  port {port} is below 1024 -- binding it needs root"),
             Style::default().fg(Color::Yellow),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let (listen, exit) = forward.explain();
+    lines.push(Line::from(Span::styled(
+        format!("  {listen}"),
+        Style::default().fg(Color::Green),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  {exit}"),
+        Style::default().fg(Color::Yellow),
+    )));
+
+    if forward.problem().is_none() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
             format!("  {}", forward.command_line()),
             Style::default().fg(Color::DarkGray),
-        )),
-    ]
+        )));
+    }
+    lines
 }
 
 fn render_forward_list(state: &SshState, area: Rect, buf: &mut Buffer) {
@@ -919,14 +941,15 @@ const EMPTY_FORWARD_HELP: &str = "\
     profiles:
       - name: daily
         forwards:
-          - host: xx-database-1
-            kind: local          # local (-L) or remote (-R)
-            bind: 29001
-            target: 0.0.0.0:9001
-            note: minio console
+          - host: kami          # the machine ssh connects to
+            kind: local         # local (-L) or remote (-R)
+            bind: 29001         # port opened on this machine
+            target: 10.0.0.5:9001
+            note: reached through kami, not from here
 
-  local  opens the port here and exits on the far side
-  remote opens the port on the far side and exits here";
+  local   opens the port here; the exit is resolved from the far side,
+          so it can name anything that host can reach
+  remote  opens the port on the far side; the exit is resolved here";
 
 fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
     let block = Block::bordered()
@@ -959,16 +982,24 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
         let health = state.health_at(slot);
         let selected = row == state.forward_index;
 
+        let broken = forward.problem().is_some();
         let mut line = vec![
             Span::styled(
                 format!("  {}  ", health.lights()),
-                Style::default().fg(light_colour(&health)),
+                Style::default().fg(if broken {
+                    Color::Red
+                } else {
+                    light_colour(&health)
+                }),
             ),
             Span::raw(format!("{:<34}", truncate(&forward.summary(), 34))),
         ];
-        line.push(match state.pid_at(slot) {
-            Some(pid) => Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray)),
-            None => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
+        line.push(match (broken, state.pid_at(slot)) {
+            (true, _) => Span::styled("incomplete", Style::default().fg(Color::Red)),
+            (false, Some(pid)) => {
+                Span::styled(format!("pid {pid}"), Style::default().fg(Color::DarkGray))
+            }
+            (false, None) => Span::styled("stopped", Style::default().fg(Color::DarkGray)),
         });
 
         let mut style = Style::default();
@@ -984,9 +1015,18 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
 
     // The legend earns its space: the three lights only mean anything if you
     // know which layer each one is.
+    // A rule that cannot be built never gets a process, so its lights stay dark
+    // and the reason has to come from the rule itself.
     let detail = state
         .selected_slot()
-        .map(|slot| state.health_at(slot).detail)
+        .and_then(|slot| {
+            let forward = state.tunnels.get(slot.0, slot.1)?;
+            Some(
+                forward
+                    .problem()
+                    .unwrap_or_else(|| state.health_at(slot).detail),
+            )
+        })
         .unwrap_or_default();
     let legend = vec![
         Line::from(Span::styled(

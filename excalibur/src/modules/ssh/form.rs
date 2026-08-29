@@ -731,6 +731,20 @@ impl ForwardField {
     fn is_pick(self) -> bool {
         matches!(self, ForwardField::Host | ForwardField::Kind)
     }
+
+    /// Shown in place of the value when a field is empty. `-L` takes
+    /// `port:host:hostport`, so the exit needs two parts and the field has to
+    /// say so -- a bare port there builds a command ssh refuses. It also has to
+    /// say whose view the host is resolved in, which is the far side for `-L`.
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            ForwardField::Host => "(pick a host)",
+            ForwardField::Kind => "(local or remote)",
+            ForwardField::Bind => "(port, or address:port)",
+            ForwardField::Target => "(host:port, resolved from the far side)",
+            ForwardField::Note => "(optional)",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -818,7 +832,14 @@ impl ForwardForm {
             }
             None => return,
         };
-        self.values[self.cursor] = value.trim().to_string();
+        let value = value.trim().to_string();
+        // Expand a bare exit port here rather than at build time, so the field
+        // shows what the command will actually contain.
+        self.values[self.cursor] = if self.field() == ForwardField::Target && !value.is_empty() {
+            Forward::normalise_target(&value)
+        } else {
+            value
+        };
     }
 
     pub fn cancel_edit(&mut self) {

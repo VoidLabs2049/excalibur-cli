@@ -570,6 +570,57 @@ mod tests {
         }
     }
 
+    fn incomplete_rule() -> tunnels::Forward {
+        // What the author actually wrote: an exit with no host, which builds
+        // `-L 22:6022` and ssh refuses.
+        tunnels::Forward {
+            host: "kami".into(),
+            kind: tunnels::Kind::Local,
+            bind: "22".into(),
+            target: "6022".into(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_form_names_the_missing_host_and_whose_view_resolves_it() {
+        let mut module = SshModule::new();
+        with_tunnels(&mut module, vec![incomplete_rule()]);
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Enter);
+        let out = rendered(&module);
+        assert!(out.contains("localhost:6022"), "no suggested fix");
+        assert!(out.contains("kami can reach"), "does not say whose view");
+    }
+
+    #[test]
+    fn committing_a_bare_exit_port_expands_it_in_the_field() {
+        // Expanded on commit rather than at build time, so the field shows what
+        // the command will contain.
+        let mut module = SshModule::new();
+        with_tunnels(&mut module, vec![incomplete_rule()]);
+        module.state.screen = Screen::Forward;
+        press(&mut module, KeyCode::Enter);
+        module.state.forward_form.as_mut().unwrap().cursor = 3;
+        press(&mut module, KeyCode::Enter); // open the text box
+        press(&mut module, KeyCode::Enter); // accept unchanged
+        assert_eq!(
+            module.state.forward_form.as_ref().unwrap().values[3],
+            "localhost:6022"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_rule_is_marked_and_refused_rather_than_launched() {
+        let mut module = SshModule::new();
+        with_tunnels(&mut module, vec![incomplete_rule()]);
+        assert!(rendered(&module).contains("incomplete"));
+
+        press(&mut module, KeyCode::Enter); // try to start it
+        let (message, _) = module.state.notification.clone().expect("a reason");
+        assert!(message.contains("localhost:6022"), "got: {message}");
+    }
+
     #[test]
     fn a_rule_with_no_process_shows_three_dark_lights() {
         let mut module = SshModule::new();
