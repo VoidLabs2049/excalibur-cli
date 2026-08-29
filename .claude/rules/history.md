@@ -46,12 +46,11 @@ User input:
 
 ## Testing
 
-- **Framework**: No tests currently
-- **Run**: `cargo test` (from `excalibur/`)
+- **No tests in this module.** `cargo test` (from `excalibur/`) passes 169, but every one of them is in `ssh`.
 
 ## Dependencies
 
 - chrono 0.4 — timestamp formatting
 - arboard 3.4 — clipboard access
 - dirs 5.0 — locate Fish history file
-- serde/serde_yaml — `RawEntry` deserialization (used in type definition, actual parsing is manual)
+- serde — `RawEntry` carries a `Deserialize` derive, but `parse_raw_entries()` reads the file line by line; nothing goes through serde here

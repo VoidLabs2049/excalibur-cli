@@ -10,6 +10,7 @@ paths:
   - "excalibur/src/modules/ssh/supervisor.rs"
   - "excalibur/src/modules/ssh/probe.rs"
   - "excalibur/src/modules/ssh/worker.rs"
+  - "excalibur/src/modules/ssh/discover.rs"
 ---
 
 # SSH

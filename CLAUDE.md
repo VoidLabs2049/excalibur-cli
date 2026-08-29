@@ -62,7 +62,7 @@ reasoning behind a design lives separately:
 
 1. Add variant to `ModuleId` in `excalibur/src/modules/mod.rs`
 2. Create `excalibur/src/modules/<name>/` with `mod.rs` implementing the `Module` trait
-3. Register in `ModuleManager::new()` in `excalibur/src/modules/manager.rs`
+3. Register in `ModuleManager::new()` in `excalibur/src/modules/manager.rs` — insert into `modules` **and** push onto `order`, which is what the main menu iterates
 4. Add CLI subcommand in `main.rs` `Commands` enum
 5. Create `.claude/rules/<module>.md` with `paths:` frontmatter listing all related source files
 6. Add an entry to the Modules table above

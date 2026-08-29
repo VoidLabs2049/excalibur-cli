@@ -83,8 +83,7 @@ precondition is missing, the module sets a notification instead of emitting.
 
 ## Testing
 
-- **Framework**: No tests currently
-- **Run**: `cargo test` (from `excalibur/`)
+- **No tests in this module.** `cargo test` (from `excalibur/`) passes 169, but every one of them is in `ssh`.
 
 ## Dependencies
 

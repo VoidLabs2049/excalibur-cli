@@ -11,6 +11,9 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct ModuleManager {
     modules: HashMap<ModuleId, Box<dyn Module>>,
+    /// Registration order — the main menu renders and indexes by this, so it
+    /// must not come from `modules`, whose iteration order varies per run.
+    order: Vec<ModuleId>,
     active_module: Option<ModuleId>,
 }
 
@@ -18,24 +21,29 @@ impl ModuleManager {
     /// Create a new module manager with all available modules
     pub fn new() -> Self {
         let mut modules: HashMap<ModuleId, Box<dyn Module>> = HashMap::new();
+        let mut order: Vec<ModuleId> = Vec::new();
 
         // Register history module
         let history = HistoryModule::new();
         modules.insert(ModuleId::History, Box::new(history));
+        order.push(ModuleId::History);
 
         // Register process tracer module (Linux only)
         #[cfg(target_os = "linux")]
         {
             let proctrace = ProcessTracerModule::new();
             modules.insert(ModuleId::ProcessTracer, Box::new(proctrace));
+            order.push(ModuleId::ProcessTracer);
         }
 
         // Register ssh module
         let ssh = SshModule::new();
         modules.insert(ModuleId::Ssh, Box::new(ssh));
+        order.push(ModuleId::Ssh);
 
         Self {
             modules,
+            order,
             active_module: None,
         }
     }
@@ -78,10 +86,11 @@ impl ModuleManager {
         None
     }
 
-    /// List all available modules
+    /// List all available modules, in registration order
     pub fn list_modules(&self) -> Vec<ModuleMetadata> {
-        self.modules
-            .values()
+        self.order
+            .iter()
+            .filter_map(|id| self.modules.get(id))
             .map(|module| module.metadata())
             .collect()
     }

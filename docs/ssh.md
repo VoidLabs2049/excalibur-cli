@@ -160,7 +160,7 @@ profiles:
 
 ```
 excalibur/src/modules/ssh/
-├── mod.rs         # SshModule + Screen 路由(Menu / Config / Forward / Dashboard)
+├── mod.rs         # SshModule + Screen 路由(Menu / Config / Forward / Dashboard / Discover)
 ├── state.rs       # 各屏状态、选中、探测结果缓存
 ├── ui.rs          # 按 Screen 分发渲染
 ├── sshconfig.rs   # ~/.ssh/config 解析:alias / 起止行号 / 字段 / 跳板 / 遮蔽
@@ -169,7 +169,8 @@ excalibur/src/modules/ssh/
 ├── tunnels.rs     # tunnels.yaml serde 读写 + 规则校验
 ├── supervisor.rs  # 起(-f -N) / 停(按 pid) / procfs 按 argv 认领
 ├── probe.rs       # ②绑定 ③端到端
-└── worker.rs      # 阻塞工作(起/停/探测)移出渲染线程
+├── worker.rs      # 阻塞工作(起/停/探测)移出渲染线程
+└── discover.rs    # 远端 ss -tlnH / netstat -tln,解析成 Listener(D1)
 ```
 
 依赖:`tui-textarea = { version = "0.7", features = ["search"] }`
@@ -179,7 +180,7 @@ CLI:`ex ssh` / 简写 `ex t`。
 
 ---
 
-## 8. 已落地(PR #3,110 个测试,模块内 0 警告)
+## 8. 第一版落地(PR #3,模块内 0 警告)
 
 ```
 ✅ 脚手架:ModuleId::Ssh + manager/CLI 注册 + 入口菜单三项 + 预览摘要
