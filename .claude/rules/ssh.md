@@ -89,9 +89,19 @@ different outcome.
 - **`probe::listening` matches by port only**, ignoring the bind address.
 - **`supervisor::scan()` returns `Vec::new()` off Linux** (it reads `/proc`), so
   the dashboard shows everything as stopped rather than failing to build. Unlike
-  proctrace, the module itself is *not* cfg-gated.
+  proctrace, the module itself is *not* cfg-gated. It also filters to our own
+  uid — `/proc/<pid>/cmdline` is world-readable, so without that another user's
+  tunnel is listed as unclaimed and offered for a `kill` that can only fail.
 - **`Slot` is `(profile_index, forward_index)`** — a position, not an identity.
   Anything cached on it must be dropped when the file reloads.
+- **The dashboard cursor runs past the last rule.** `forward_index` indexes
+  rules on the forward screen and rules-then-orphans on the dashboard, which is
+  what `state::cursor_span()` decides. Use `goto()` to change screen: a cursor
+  parked on an orphan row selects nothing on the forward screen, and `n`/`c`/`d`
+  then do nothing at all. `selected_slot()` returning `None` is how the mark and
+  start keys stay off orphans — that is deliberate, not an oversight.
+- **Orphans are `scan()` minus `find()`, never a pattern.** Anything broad
+  enough to claim the rest also claims the process doing the claiming.
 
 ## Data flow
 
@@ -121,7 +131,18 @@ Enter on dashboard → forward.problem()?  → notify and refuse
 
 ## Testing
 
-110 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
+135 tests, `cargo test` from `excalibur/`. Parser tests use in-memory fixtures
 (`SshConfig::parse`), UI tests render into a `Buffer` and assert on the text —
 including a narrow-terminal case, because the right-flushed note is the part
 that must survive truncation.
+
+The suite runs against the real machine, so three things must stay true of any
+new test — each of them fails by *doing* something, not by erroring:
+
+- **Never call a method that saves.** `save_forward_form`/`delete_forward` write
+  the user's real `~/.config/excalibur/tunnels.yaml`. The in-memory halves
+  (`apply_forward_form`, `remove_selected_forward`) exist for tests.
+- **Never leave a startable rule in a scope you then start.** `start_slots`
+  spawns real `ssh`. Give the rule a `running` entry so it counts as already up.
+- **Any pid a test may stop must not exist.** `NO_SUCH_PID` in `mod.rs` sits
+  above Linux's `pid_max` ceiling of 2^22 for exactly this.

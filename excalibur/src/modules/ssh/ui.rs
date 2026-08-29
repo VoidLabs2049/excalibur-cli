@@ -125,6 +125,12 @@ fn render_help(state: &SshState, area: Rect, buf: &mut Buffer) {
                  Enter: this one   r: refresh"
             )
         }
+        // An orphan cannot be marked or started -- there is no rule to do either
+        // to -- so say what the one key that does work will do.
+        Screen::Dashboard if state.selected_orphan().is_some() => {
+            " unclaimed process   Enter: stop it   j/k: navigate   r: refresh   Esc: back"
+                .to_string()
+        }
         Screen::Dashboard => {
             " j/k: navigate   Enter: start/stop   Space: mark   a: start all   A: stop all   r: refresh   Esc: back"
                 .to_string()
@@ -287,7 +293,8 @@ fn forward_summary(state: &SshState) -> Vec<Line<'static>> {
 }
 
 fn dashboard_summary(state: &SshState) -> Vec<Line<'static>> {
-    if state.tunnels.count() == 0 {
+    let orphans = state.orphans();
+    if state.tunnels.count() == 0 && orphans.is_empty() {
         return vec![Line::from(Span::styled(
             "  no forwards defined yet",
             Style::default().fg(Color::DarkGray),
@@ -312,6 +319,17 @@ fn dashboard_summary(state: &SshState) -> Vec<Line<'static>> {
             ),
             Span::raw(forward.summary()),
         ]));
+    }
+    // The preview is where the dashboard is picked from, so a port held by
+    // something the rules do not mention has to be visible before opening it.
+    if !orphans.is_empty() {
+        lines.push(Line::from(""));
+        for running in orphans {
+            lines.push(Line::from(Span::styled(
+                format!("  ?      {}   unclaimed", running.summary()),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     }
     lines
 }
@@ -982,9 +1000,14 @@ const EMPTY_FORWARD_HELP: &str = "\
   remote  opens the port on the far side; the exit is resolved here";
 
 fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
+    let orphans = state.orphans();
+    let unclaimed = match orphans.len() {
+        0 => String::new(),
+        n => format!("  +{n} unclaimed"),
+    };
     let block = Block::bordered()
         .title(format!(
-            " Tunnels   {} of {} up ",
+            " Tunnels   {} of {} up{unclaimed} ",
             state.live_count(),
             state.tunnels.count()
         ))
@@ -992,7 +1015,9 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
     let inner = block.inner(area);
     block.render(area, buf);
 
-    if state.tunnels.count() == 0 {
+    // An empty tunnels.yaml with tunnels running by hand is exactly the case
+    // the orphan list is for, so the placeholder must not hide it.
+    if state.tunnels.count() == 0 && orphans.is_empty() {
         Paragraph::new("  no forwards defined -- add some under `Edit tunnel profiles`")
             .style(Style::default().fg(Color::DarkGray))
             .render(inner, buf);
@@ -1064,6 +1089,34 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
         }
     }
 
+    if !orphans.is_empty() {
+        items.push(orphan_heading(orphans.len(), chunks[0].width as usize));
+        for running in &orphans {
+            if row == state.forward_index {
+                selected_item = Some(items.len());
+            }
+            let mut style = Style::default();
+            if row == state.forward_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            // Deliberately not the three lights: they belong to a rule, and only
+            // the first of the three could be answered here anyway. `?` keeps the
+            // column width so the summary and the pid stay in line.
+            items.push(
+                ListItem::new(Line::from(vec![
+                    Span::styled("   ?      ", Style::default().fg(Color::Yellow)),
+                    Span::raw(format!("{:<34}", truncate(&running.summary(), 34))),
+                    Span::styled(
+                        format!("pid {}", running.pid),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+                .style(style),
+            );
+            row += 1;
+        }
+    }
+
     let mut list_state = ListState::default();
     list_state.select(selected_item);
     StatefulWidget::render(List::new(items), chunks[0], buf, &mut list_state);
@@ -1072,17 +1125,23 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
     // know which layer each one is.
     // A rule that cannot be built never gets a process, so its lights stay dark
     // and the reason has to come from the rule itself.
-    let detail = state
-        .selected_slot()
-        .and_then(|slot| {
-            let forward = state.tunnels.get(slot.0, slot.1)?;
-            Some(
-                forward
-                    .problem()
-                    .unwrap_or_else(|| state.health_at(slot).detail),
-            )
-        })
-        .unwrap_or_default();
+    let detail = match state.selected_orphan() {
+        // The whole point of the row: it holds a port and no rule says so.
+        Some(_) => "no rule describes this -- a rule edited while running leaves \
+                    its process here"
+            .to_string(),
+        None => state
+            .selected_slot()
+            .and_then(|slot| {
+                let forward = state.tunnels.get(slot.0, slot.1)?;
+                Some(
+                    forward
+                        .problem()
+                        .unwrap_or_else(|| state.health_at(slot).detail),
+                )
+            })
+            .unwrap_or_default(),
+    };
     let legend = vec![
         Line::from(Span::styled(
             "  process / listening / path        * up   x failed   - not observable   o stopped",
@@ -1133,6 +1192,24 @@ fn profile_heading(state: &SshState, index: usize, name: &str, width: usize) -> 
                 Color::Yellow
             }),
         ),
+    ]))
+}
+
+/// Heading for the processes no rule claims.
+///
+/// Yellow rather than red: an orphan is not necessarily wrong -- a tunnel
+/// started by hand is one too -- it is just unaccounted for.
+fn orphan_heading(count: usize, width: usize) -> ListItem<'static> {
+    let note = format!("{count} not in any rule");
+    let pad = (STATUS_COLUMN - 1).min(width.saturating_sub(note.chars().count() + 1));
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            format!(" {:<pad$}", truncate("unclaimed", pad)),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(note, Style::default().fg(Color::Yellow)),
     ]))
 }
 

@@ -10,6 +10,8 @@ pub type Slot = (usize, usize);
 pub enum Job {
     Start(Slot, Forward),
     Stop(Slot, u32),
+    /// Stop a process no rule claims, which therefore has no slot to name it by.
+    StopOrphan(u32),
     /// Measure every rule that currently has a process behind it.
     Probe(Vec<(Slot, Forward)>),
 }
@@ -17,6 +19,7 @@ pub enum Job {
 pub enum Outcome {
     Started(Slot, Result<(), String>),
     Stopped(Slot, Result<(), String>),
+    StoppedOrphan(u32, Result<(), String>),
     Probed(Vec<(Slot, Health)>),
 }
 
@@ -48,6 +51,10 @@ impl Worker {
                     Job::Stop(slot, pid) => {
                         Outcome::Stopped(slot, supervisor::stop(pid).map_err(|e| e.to_string()))
                     }
+                    Job::StopOrphan(pid) => Outcome::StoppedOrphan(
+                        pid,
+                        supervisor::stop(pid).map_err(|e| e.to_string()),
+                    ),
                     Job::Probe(rules) => Outcome::Probed(
                         rules
                             .into_iter()

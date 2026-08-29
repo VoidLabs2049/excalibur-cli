@@ -156,17 +156,35 @@ impl SshState {
         self.marked.clear();
     }
 
+    /// Move to another screen, keeping the cursor on a row the new screen has.
+    ///
+    /// The dashboard has rows after the last rule -- the orphans -- and the
+    /// forward list does not, so a cursor parked on one would arrive over there
+    /// selecting nothing at all, and `n`/`c`/`d` would quietly do nothing.
+    pub fn goto(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.forward_index = self.forward_index.min(self.cursor_span().saturating_sub(1));
+    }
+
+    /// How many rows the cursor can land on, which is screen-dependent.
+    fn cursor_span(&self) -> usize {
+        match self.screen {
+            Screen::Dashboard => self.tunnels.count() + self.orphans().len(),
+            _ => self.tunnels.count(),
+        }
+    }
+
     pub fn forward_next(&mut self) {
-        let count = self.tunnels.count();
-        if count > 0 {
-            self.forward_index = (self.forward_index + 1) % count;
+        let span = self.cursor_span();
+        if span > 0 {
+            self.forward_index = (self.forward_index + 1) % span;
         }
     }
 
     pub fn forward_previous(&mut self) {
-        let count = self.tunnels.count();
-        if count > 0 {
-            self.forward_index = (self.forward_index + count - 1) % count;
+        let span = self.cursor_span();
+        if span > 0 {
+            self.forward_index = (self.forward_index + span - 1) % span;
         }
     }
 
@@ -542,7 +560,10 @@ impl SshState {
                     let what = self.describe(slot);
                     self.notify(format!("{what} failed to stop: {e}"));
                 }
-                Outcome::Started(..) | Outcome::Stopped(..) => {
+                Outcome::StoppedOrphan(pid, Err(e)) => {
+                    self.notify(format!("pid {pid} failed to stop: {e}"));
+                }
+                Outcome::Started(..) | Outcome::Stopped(..) | Outcome::StoppedOrphan(..) => {
                     // Reflect it immediately rather than waiting out the timer.
                     self.last_scan = None;
                     self.last_probe = None;
@@ -563,6 +584,9 @@ impl SshState {
                 .filter(|slot| self.pid_at(*slot).is_some())
                 .collect();
             self.health.retain(|slot, _| live.contains(slot));
+            // Orphans come and go with the scan, so the last row can disappear
+            // out from under the cursor.
+            self.forward_index = self.forward_index.min(self.cursor_span().saturating_sub(1));
         }
         if due(self.last_probe, PROBE_INTERVAL) {
             self.request_probe();
@@ -598,6 +622,48 @@ impl SshState {
                 .cloned()
                 .unwrap_or_else(Health::measuring),
         }
+    }
+
+    /// Tunnel processes that no rule accounts for.
+    ///
+    /// Editing a rule while it runs strands its process: `find()` matches on
+    /// `(kind, spec, host)`, so changing any of the three leaves the old process
+    /// alive and still holding the port while the rule reads as stopped. The
+    /// port is taken and nothing on screen says by what -- which is the failure
+    /// this module exists to make visible.
+    ///
+    /// Defined as what `scan()` saw minus what `find()` claimed. There is no
+    /// pattern-matching fallback for the rest, and there must not be: a pattern
+    /// broad enough to catch them also catches the process doing the matching
+    /// (see ~/.claude/remote-ops.md).
+    pub fn orphans(&self) -> Vec<&Running> {
+        let claimed: HashSet<u32> = self
+            .tunnels
+            .all()
+            .into_iter()
+            .filter_map(|slot| self.pid_at(slot))
+            .collect();
+        self.running
+            .iter()
+            .filter(|running| !claimed.contains(&running.pid))
+            .collect()
+    }
+
+    /// The orphan under the cursor, which is any row past the last rule.
+    pub fn selected_orphan(&self) -> Option<&Running> {
+        let past = self.forward_index.checked_sub(self.tunnels.count())?;
+        self.orphans().into_iter().nth(past)
+    }
+
+    /// Stop the orphan under the cursor. Reports whether there was one, so the
+    /// caller can fall through to the rule action when there was not.
+    pub fn stop_selected_orphan(&mut self) -> bool {
+        let Some(pid) = self.selected_orphan().map(|running| running.pid) else {
+            return false;
+        };
+        self.worker.submit(Job::StopOrphan(pid));
+        self.notify(format!("Stopping pid {pid}"));
+        true
     }
 
     pub fn selected_slot(&self) -> Option<Slot> {

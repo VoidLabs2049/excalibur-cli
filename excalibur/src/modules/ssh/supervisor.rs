@@ -13,6 +13,14 @@ pub struct Running {
     pub host: String,
 }
 
+impl Running {
+    /// The same shape as `Forward::summary`, so a process listed next to the
+    /// rules reads in the same column.
+    pub fn summary(&self) -> String {
+        format!("{} {} {}", self.kind.flag(), self.spec, self.host)
+    }
+}
+
 /// ssh options that consume the following word. Everything else in a `-abc`
 /// cluster is a boolean, so the destination is the first bare word that is not
 /// one of these values -- which is how the host is told apart from a port.
@@ -70,14 +78,24 @@ pub fn parse_argv(argv: &[String]) -> Option<(Kind, String, String)> {
 ///
 /// Linux-only: it reads `/proc`. Elsewhere the dashboard shows everything as
 /// stopped rather than failing to build.
+///
+/// Restricted to our own uid because `/proc/<pid>/cmdline` is world-readable:
+/// without it another user's tunnel is listed as unclaimed and offered for
+/// stopping, and the `kill` behind that offer can only fail.
 #[cfg(target_os = "linux")]
 pub fn scan() -> Vec<Running> {
     let Ok(processes) = procfs::process::all_processes() else {
         return Vec::new();
     };
+    let me = procfs::process::Process::myself()
+        .ok()
+        .and_then(|process| process.uid().ok());
     processes
         .filter_map(|process| {
             let process = process.ok()?;
+            if me.is_some_and(|uid| process.uid().ok() != Some(uid)) {
+                return None;
+            }
             let pid = u32::try_from(process.pid()).ok()?;
             let (kind, spec, host) = parse_argv(&process.cmdline().ok()?)?;
             Some(Running {

@@ -52,7 +52,7 @@ impl SshModule {
                 Ok(ModuleAction::None)
             }
             KeyCode::Enter => {
-                self.state.screen = self.state.menu_entry().screen;
+                self.state.goto(self.state.menu_entry().screen);
                 Ok(ModuleAction::None)
             }
             _ => Ok(ModuleAction::None),
@@ -89,7 +89,7 @@ impl SshModule {
 
         match key.code {
             KeyCode::Esc => {
-                self.state.screen = Screen::Menu;
+                self.state.goto(Screen::Menu);
                 Ok(ModuleAction::None)
             }
             KeyCode::Char('q') => Ok(ModuleAction::Exit),
@@ -192,7 +192,7 @@ impl SshModule {
             return self.handle_forward_form_key(key);
         }
         match key.code {
-            KeyCode::Esc => self.state.screen = Screen::Menu,
+            KeyCode::Esc => self.state.goto(Screen::Menu),
             KeyCode::Char('q') => return Ok(ModuleAction::Exit),
             KeyCode::Up | KeyCode::Char('k') => self.state.forward_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
@@ -275,14 +275,20 @@ impl SshModule {
 
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> Result<ModuleAction> {
         match key.code {
-            KeyCode::Esc => self.state.screen = Screen::Menu,
+            KeyCode::Esc => self.state.goto(Screen::Menu),
             KeyCode::Char('q') => return Ok(ModuleAction::Exit),
             KeyCode::Up | KeyCode::Char('k') => self.state.forward_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.state.forward_next(),
             // Enter stays a toggle because it acts on exactly one rule. The
             // scope keys cannot: with a mixed set of running and stopped rules
             // there is no answer to which way a toggle should go.
-            KeyCode::Enter => self.state.toggle_selected_tunnel(),
+            //
+            // On an orphan there is no rule to start, so it can only stop.
+            KeyCode::Enter => {
+                if !self.state.stop_selected_orphan() {
+                    self.state.toggle_selected_tunnel();
+                }
+            }
             KeyCode::Char(' ') => self.state.toggle_mark(),
             KeyCode::Char('g') => self.state.toggle_group_mark(),
             KeyCode::Char('u') => self.state.clear_marks(),
@@ -1067,6 +1073,138 @@ mod tests {
         assert!(
             module.state.marked.is_empty(),
             "a mark survived a delete and now names a different rule"
+        );
+    }
+
+    /// Above Linux's pid_max ceiling of 2^22, so a stop that reaches the worker
+    /// cannot land on a real process.
+    const NO_SUCH_PID: u32 = 40_000_000;
+
+    fn running(pid: u32, spec: &str) -> supervisor::Running {
+        supervisor::Running {
+            pid,
+            kind: tunnels::Kind::Local,
+            spec: spec.into(),
+            host: "nowhere".into(),
+        }
+    }
+
+    #[test]
+    fn only_the_processes_no_rule_claims_are_listed_as_unclaimed() {
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![
+            running(4242, &forward("39001").spec()),
+            running(NO_SUCH_PID, "6022:localhost:22"),
+        ];
+        assert_eq!(module.state.orphans().len(), 1, "the claimed one leaked");
+        assert_eq!(module.state.orphans()[0].pid, NO_SUCH_PID);
+
+        let out = rendered(&module);
+        assert!(out.contains("+1 unclaimed"), "the title does not count it");
+        assert!(out.contains("pid 4242"), "the claimed one left its rule");
+    }
+
+    #[test]
+    fn a_rule_edited_while_running_leaves_its_process_on_screen() {
+        // The failure this list exists for: the old process keeps holding 6022,
+        // but `find()` matches on (kind, spec, host) and no longer recognises
+        // it, so the port is taken and nothing says by what.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("6024")])]);
+        module.state.running = vec![running(NO_SUCH_PID, "6022:127.0.0.1:1")];
+
+        let out = rendered(&module);
+        assert!(
+            out.contains("0/1 up"),
+            "the edited rule should read as down"
+        );
+        assert!(
+            out.contains("unclaimed"),
+            "the stranded process is invisible"
+        );
+        assert!(out.contains("-L 6022:127.0.0.1:1"), "nothing identifies it");
+        assert!(
+            out.contains(&format!("pid {NO_SUCH_PID}")),
+            "no pid to stop it by"
+        );
+    }
+
+    #[test]
+    fn the_cursor_walks_from_the_last_rule_into_the_orphans_and_wraps() {
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(NO_SUCH_PID, "6022:localhost:22")];
+
+        assert!(module.state.selected_slot().is_some());
+        press(&mut module, KeyCode::Char('j'));
+        assert!(module.state.selected_slot().is_none(), "still on a rule");
+        assert_eq!(module.state.selected_orphan().unwrap().pid, NO_SUCH_PID);
+        assert!(
+            rendered(&module).contains("Enter: stop it"),
+            "the footer still offers start/stop on a row that cannot start"
+        );
+        press(&mut module, KeyCode::Char('j'));
+        assert!(module.state.selected_slot().is_some(), "did not wrap round");
+    }
+
+    #[test]
+    fn enter_on_an_orphan_stops_it_by_pid() {
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(NO_SUCH_PID, "6022:localhost:22")];
+        press(&mut module, KeyCode::Char('j'));
+        press(&mut module, KeyCode::Enter);
+
+        let (message, _) = module.state.notification.clone().expect("a report");
+        assert!(
+            message.contains(&format!("pid {NO_SUCH_PID}")),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn an_orphan_cannot_be_marked() {
+        // Marks are rule positions and an orphan has none, so `s`/`S` can never
+        // reach one -- Space must not look as though it did something.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(NO_SUCH_PID, "6022:localhost:22")];
+        press(&mut module, KeyCode::Char('j'));
+        press(&mut module, KeyCode::Char(' '));
+        assert!(module.state.marked.is_empty());
+    }
+
+    #[test]
+    fn leaving_the_dashboard_from_an_orphan_row_lands_back_on_a_rule() {
+        // The forward list has no rows past the last rule, so a cursor left out
+        // there would select nothing and n/c/d would quietly do nothing.
+        let mut module = SshModule::new();
+        with_profiles(&mut module, vec![("daily", vec![forward("39001")])]);
+        module.state.running = vec![running(NO_SUCH_PID, "6022:localhost:22")];
+        press(&mut module, KeyCode::Char('j'));
+        module.state.goto(Screen::Forward);
+        assert!(module.state.selected_forward().is_some());
+    }
+
+    #[test]
+    fn a_dashboard_with_no_rules_at_all_still_shows_what_is_running() {
+        // An empty tunnels.yaml plus tunnels started by hand is exactly the case
+        // the list is for, so the "nothing defined" placeholder must not win.
+        let mut module = SshModule::new();
+        module.state.screen = Screen::Dashboard;
+        module.state.running = vec![running(NO_SUCH_PID, "6022:localhost:22")];
+        let out = rendered(&module);
+        assert!(out.contains("unclaimed"));
+        assert!(
+            !out.contains("no forwards defined"),
+            "the placeholder hid it"
+        );
+
+        module.state.screen = Screen::Menu;
+        assert!(
+            rendered(&module).contains("unclaimed"),
+            "invisible from the preview the dashboard is opened from"
         );
     }
 
