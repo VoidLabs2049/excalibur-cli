@@ -164,7 +164,8 @@ fn render_results_mode(state: &ProcessTracerState, area: Rect, buf: &mut Buffer)
     render_detailed_analysis(state, chunks[2], buf);
 
     // Status bar
-    let status_text = "[j/k] Navigate  [PageUp/Down] Scroll  [/] New Query  [Esc] Back";
+    let status_text =
+        "[j/k] Navigate  [/] New Query  [l] logs  [r] restart  [x] kill  [c] cd  [Esc] Back";
     let status = Paragraph::new(status_text)
         .block(
             Block::bordered()

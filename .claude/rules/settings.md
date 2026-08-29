@@ -10,6 +10,8 @@ paths:
 
 Claude Code settings profile manager. Lists `~/.claude/settings*.json` files, previews JSON content, swaps the active `settings.json` with a selected profile, and supports copy / rename / delete plus an in-place JSON key-value editor.
 
+This module emits no commands — every action is a file operation it performs itself, so there is nothing to hand back to the shell. It still routes through `ex s`, which simply repaints when a module emits nothing.
+
 ## Key Files
 
 | File | Role |
@@ -17,7 +19,7 @@ Claude Code settings profile manager. Lists `~/.claude/settings*.json` files, pr
 | `mod.rs` | `SettingsModule` — implements `Module`, dispatches the 8 `InputMode`s to per-mode handlers, executes swap/copy/rename/delete file operations |
 | `state.rs` | `SettingsState` — profile scanning, selection, JSON preview, rename input buffer (with cursor), and the flattened key-value editor (`edit_entries`, `edit_value_buf`, `edit_cursor`) |
 | `ui.rs` | Vertical layout: header / (profile list + preview-or-edit panel) / action bar / status bar; preview switches to the key-value edit panel in `EditKeys`/`EditValue` modes; notification overlay |
-| `install/excc.fish` | Fish function `excc` that launches `excalibur s` and repaints the prompt |
+| `install/excc.fish` | Fish function `excc` — a thin alias for `ex s` (see `install/ex.fish`) |
 
 ## Input Modes (`InputMode`)
 

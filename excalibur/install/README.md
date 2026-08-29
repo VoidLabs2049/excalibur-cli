@@ -2,6 +2,15 @@
 
 This directory contains the Fish shell integration for Excalibur.
 
+| File | Function | Role |
+|------|----------|------|
+| `ex.fish` | `ex <module>` | Generic wrapper — owns the exit-code protocol. Works for every module. |
+| `exh.fish` | `exh` | Alias for `ex h`, plus the `Ctrl+R` binding |
+| `excc.fish` | `excc` | Alias for `ex s` |
+
+`ex` is the only place that knows the protocol, so a new module needs no new
+fish function — `ex pt`, `ex s`, … just work.
+
 ## Installation
 
 ### Step 1: Build and Install Excalibur
@@ -12,24 +21,26 @@ cargo build --release
 cargo install --path .
 ```
 
-### Step 2: Install Fish Function
+### Step 2: Install Fish Functions
 
 ```bash
-# Copy the function file
-cp exh.fish ~/.config/fish/functions/
+# ex.fish is required; the others are optional conveniences
+cp ex.fish exh.fish excc.fish ~/.config/fish/functions/
 
 # Reload Fish configuration
 source ~/.config/fish/config.fish
 ```
 
-The function is automatically named `exh` (Excalibur History) and bound to `Ctrl+R`.
+`exh` (Excalibur History) is bound to `Ctrl+R`.
 
 ## Usage
 
 ### Method 1: Command
 
 ```fish
-exh
+ex h     # or the alias: exh
+ex pt    # process tracer — emits kill / journalctl / systemctl / cd
+ex s     # or the alias: excc
 ```
 
 ### Method 2: Keybinding
@@ -55,9 +66,9 @@ excalibur
 ## How It Works
 
 ```
-User presses Ctrl+R
+User presses Ctrl+R (or runs `ex <module>`)
     ↓
-Fish calls excalibur function
+Fish function `ex` calls the excalibur binary
     ↓
 Rust program launches TUI
     ↓

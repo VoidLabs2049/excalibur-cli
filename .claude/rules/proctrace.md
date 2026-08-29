@@ -11,7 +11,7 @@ paths:
 
 # Process Tracer
 
-Query-driven process inspector ("Why is this running?"). Queries by name, PID, or port; shows ancestor chain, network bindings, systemd metadata, environment, and warnings.
+Query-driven process inspector ("Why is this running?"). Queries by name, PID, or port; shows ancestor chain, network bindings, systemd metadata, environment, and warnings — then hands a ready-made command back to the shell.
 
 **Linux-only**: the entire module is gated behind `#[cfg(target_os = "linux")]` — the `proctrace` module, the `ModuleId::ProcessTracer` variant, its `ModuleManager` registration, and the `process-tracer` CLI subcommand all compile out on non-Linux targets (it reads `/proc`). See [core.md](core.md).
 
@@ -44,6 +44,23 @@ User input (query string)
         fetch_systemd_metadata (if systemd supervisor)
   → Vec<QueryResult> → state.query_results
 ```
+
+## Emitting commands (`ViewResults` mode)
+
+The query already resolved the parts that are hard to recall — PID, systemd unit,
+working directory — so `emit_from_selection()` in `mod.rs` is pure formatting.
+Run via `ex pt` for the emitted command to reach the command line.
+
+| Key | Emits | Requires |
+|-----|-------|----------|
+| `l` | `journalctl -u <unit> -f` | `Supervisor::Systemd` |
+| `r` | `systemctl restart <unit>` | `Supervisor::Systemd` |
+| `x` | `kill <pid>` | — |
+| `c` | `cd <cwd>` | `working_directory` |
+
+All four use `ModuleAction::Output` (exit 0, editable), never `OutputAndExecute`:
+they kill or restart things, so the target is worth a glance first. When the
+precondition is missing, the module sets a notification instead of emitting.
 
 ## Design Patterns
 
