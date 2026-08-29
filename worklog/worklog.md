@@ -121,7 +121,7 @@ shell 集成:`install/ex.fish` 定义通用 `ex <module>`,**独占** exit-code �
 
 ## 5. SSH 模块:隧道仪表盘 + config 编辑器(下一个)
 
-> 2026-08-29 重写。原设计(远端路径浏览器)降级为后续项,见 §5.8。
+> 2026-08-29 重写。原设计(远端路径浏览器)降级为后续项,见 §5.12。
 
 ### 5.1 真实场景
 
@@ -242,7 +242,7 @@ ssh_config 提供指令补全、语法校验、遮蔽检测,专用 TUI 编辑器
 - 值补全(`IdentityFile` 补 `~/.ssh` 下文件、`ProxyJump` 补已有 alias)
 - 逐键校验,错误行当场标红
 - undo/redo、词级移动、搜索(crate 的 `search` feature)
-- 键位用 crate 默认(emacs 风),**不自写 vim 模态状态机**(见 §5.10)
+- 键位用 crate 默认(emacs 风),**不自写 vim 模态状态机**(见 §5.11)
 
 > ⚠️ **表单存盘必须原样保留它不覆盖的指令。** `windows-via-reverse` 有 5 条表单外
 > 指令;若表单按字段整块重写,这些指令会**静默消失** —— ssh 行为的变化要过很久
@@ -295,39 +295,75 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 
 ### 5.9 实现步骤
 
+已落地(第一个 PR,110 个测试,模块内 0 警告):
+
 ```
-1. 脚手架:ModuleId::Ssh + 目录 + manager/CLI 注册 + 入口菜单三项(预览留空)
-   → 验证:ex ssh 显示菜单,j/k 能动
-2. sshconfig.rs 解析
-   → 验证:35 个 host 全出;6 个 ⤳ 标对(含 ProxyCommand -W 反解);
-           kami 的行 60 标出「被行 6 遮蔽」;xx-trade-wsl1 的尾空格不炸
-3. 子视图 1:host 列表 + fuzzy + 结构化表单(6 字段 + 候选下拉)+ diff 预览 + 原子写/备份
-   → 验证:改 kami 的 Port,diff 只有 1 行,其余 190 行字节不动;
-           改 windows-via-reverse 的 Port,它那 5 条表单外指令一条不少
-3b. Tab 切 tui-textarea 块内编辑(crate 默认键位)+ 补全 + 逐键校验
-   → 验证:块内加一行 ServerAliveInterval 30 存盘,其余 190 行字节不动
-3c. g → ssh -G 生效值对照
-   → 验证:kami 显示行 60 被遮蔽
-4. tunnels.rs + 子视图 2 编辑
-   → 验证:新建一条转发存盘,重进能读回
-5. supervisor.rs:procfs 认领 + 起/停
-   → 验证:手动开一条 ssh -N -L → ①灯亮;TUI 里起停;
-           退出 TUI 隧道仍活,重进仍认得
-6. probe.rs:②③ 灯 + 后台线程
-   → 验证:占住 bind 端口再起 → ①绿②红;停掉远端服务 → ①②绿③红
-7. 仪表盘 a 全起 / A 全停 + 菜单第 3 项预览摘要
-   → 验证:一键拉起整个「日常」档案
-8. d 远端端口发现(ss → netstat 降级,loopback 高亮)
-   → 验证:对 xx-database-1 列出监听端口,选一个直接起
-9. n 新建(三模板) / c 克隆(追加到文件末尾)
-   → 验证:克隆 xx-trade-wsl1 改端口,diff 只有末尾新增
-10. sparkline(/proc/<pid>/io;读前先比对 argv 确认 pid 属于目标隧道)
-11. .claude/rules/ssh.md + CLAUDE.md 模块表
+✅ 1. 脚手架:ModuleId::Ssh + 目录 + manager/CLI 注册 + 入口菜单三项
+✅ 2. sshconfig.rs 解析
+      实测:35 个 host 全出、6 个跳板标对(含 ProxyCommand -W 反解)、
+      kami 行 60 标出被行 6 遮蔽、round-trip 字节一致
+✅ 3. 子视图 1:host 列表 + fuzzy + 6 字段表单(候选下拉)+ diff 预览
+      + 原子写 + config.excalibur.bak 备份 + 保留原文件权限位
+✅ 3c. g → ssh -G 生效值对照(含 Match exec 拒绝执行)
+✅ 4. tunnels.rs + 子视图 2 编辑(n 新建 / Enter 改 / d 删 / Ctrl+S 存)
+✅ 5. supervisor.rs:按 argv 结构认领 + 起(-f -N) / 停(按 pid)
+✅ 6. probe.rs:三层灯 + 后台 worker 线程
+✅ 7. 仪表盘 a 全起 / A 全停 / r 刷新 + 菜单第 3 项预览摘要
+```
+
+### 5.10 待落地
+
+按优先级排。前三条是使用中直接提出来的,优先于原计划里剩下的。
+
+**A. 转发界面的可读性(2026-08-29 使用反馈)**
+
+1. **流向图形化** —— 详情面板现在是两行文字(`listen here / exit from kami`)。
+   改成竖向流水图,把三段(入口 / 跳板 / 出口)画出来:
+
+   ```
+   in   here             6022
+        │  through ssh
+   hop  kami
+        │  kami connects to
+   out  localhost:22   (= kami itself)
+   ```
+
+   `-R` 时第一段换成对端。**只用 ratatui 已在用的制表符**(`│`),
+   不用 `▼`/`→` 这类东亚宽度歧义字符。
+2. **左栏显示 Note** —— 现在只有 `-L 6022:localhost:22 kami`,备注看不到,
+   而备注往往是唯一能说清这条规则用途的东西。第二行 dim 显示。
+3. **仪表盘统计** —— 每条:运行时长 + 吞吐速率;汇总:up / stopped /
+   incomplete 计数与总速率;选中项画 sparkline。
+   数据源 `/proc/<pid>/stat` 的 starttime 与 `/proc/<pid>/io` 的 rchar+wchar。
+   ⚠️ **读之前 pid 必须已由 argv 匹配确认属于目标隧道**,否则量的是别的进程
+   (见 `~/.claude/remote-ops.md`「观测之前先确认观测对象是对的」)。
+   实现上把计数与身份分开:`supervisor::usage(pid) -> Usage`,不塞进 `Running`。
+
+**B. 原计划剩余**
+
+4. **`d` 远端端口发现** —— `ssh <host> ss -tlnH`,降级 `netstat -tln`。
+   **只监听 loopback 的排前面并高亮**(本机实测 12 条里 10 条如此),
+   因为那些正是只能靠 `-L` 访问的。选中 `Enter` 直接起 / `s` 存进档案。
+5. **`n` 新建 / `c` 克隆 host** —— 三模板(基础 / 经跳板 / 带 IdentityFile);
+   克隆追加到文件末尾,不碰现有字节。对 `xx-trade-wsl1..4` 这种只差端口的族群。
+6. **3b 块内多行编辑** —— `Tab` 切 `tui-textarea` 编辑选中 host 的那几行,
+   带 ~80 个 OpenSSH 关键字补全与逐键校验。
+   现状:`tui-textarea` 依赖已引入,但只用在表单的单行字段上。
+   **优先级最低** —— 6 字段表单已覆盖 35 个块里的 32 个,这一层是补充。
+7. **文档** —— `.claude/rules/ssh.md` + CLAUDE.md 模块表 + 本节收尾。
+
+**C. 已知边界(不是 bug,写下来免得重复发现)**
+
+- `-R` 的第二盏灯恒为 `-`:端口开在对端,本机无法观测。能测的是出口
+  (要暴露的服务在本机活着没有),已如此实现。
+- `-R` 还需要远端 sshd `GatewayPorts yes` 才能被第三台机器访问,详情面板已提示。
+- `-D`(SOCKS)不做,history 里 0 次使用。
+- 自动重连不做,红灯 + 一键重起。
 ```
 
 风险点:2(脏 config 解析 + 遮蔽)、5(argv 认领)、6(三层灯语义)。
 
-### 5.10 明确砍掉的(以及为什么)
+### 5.11 明确砍掉的(以及为什么)
 
 | 砍掉 | 理由 |
 |---|---|
@@ -341,7 +377,7 @@ CLI:`ex ssh` / 简写 `ex t`(`s` 已被 settings 占用)。
 | 自动重连 | 引入后台循环,且「它怎么自己又起来了」很困惑。红灯 + 一键重起够用 |
 | 模块内起前台隧道 / 完整生命周期管理 | `-f` detach + procfs 认领已覆盖,不必持有子进程状态 |
 
-### 5.11 后续:远端路径浏览器(原设计,降级保留)
+### 5.12 后续:远端路径浏览器(原设计,降级保留)
 
 §2.3 的定量依据仍然成立(fish 对远端路径零补全,`__rsync_remote_target` 只回显;
 104 条 rsync 全不重复)。选主机 → `ssh ls` 走目录树 → `t` 吐 rsync 拉取行。
