@@ -1,10 +1,10 @@
 use super::discover::Listener;
 use super::effective::{self, Effective};
 use super::form::{BlockEdit, Field, ForwardForm, HostForm, write_config};
-use super::probe::Health;
+use super::probe::{self, Health, Light};
 use super::sshconfig::{HostBlock, SshConfig};
 use super::supervisor::{self, Running, Usage};
-use super::tunnels::{Forward, Kind, Profile, Tunnels};
+use super::tunnels::{Forward, Kind, Profile, Protocol, Tunnels};
 use super::worker::{Job, Outcome, Slot, Worker};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 const NOTIFICATION_TTL: Duration = Duration::from_secs(5);
 /// Reading /proc is cheap, but not 30 times a second.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
-/// The end-to-end probe costs a TCP round trip per rule, so it runs rarely.
-const PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// One process's last measurement, plus the rate that came out of comparing it
 /// with the one before.
@@ -142,7 +140,6 @@ pub struct SshState {
     pub meters: HashMap<u32, Meter>,
     worker: Worker,
     last_scan: Option<Instant>,
-    last_probe: Option<Instant>,
 }
 
 impl SshState {
@@ -172,7 +169,6 @@ impl SshState {
             meters: HashMap::new(),
             worker: Worker::spawn(),
             last_scan: None,
-            last_probe: None,
         }
     }
 
@@ -267,6 +263,7 @@ impl SshState {
                     kind: Kind::Local,
                     bind: String::new(),
                     target: String::new(),
+                    protocol: Protocol::Tcp,
                     note: String::new(),
                 },
                 &group,
@@ -861,6 +858,7 @@ impl SshState {
                 kind: Kind::Local,
                 bind,
                 target: format!("localhost:{port}"),
+                protocol: Protocol::Tcp,
                 note: format!("found listening on {host}"),
             });
         }
@@ -937,8 +935,8 @@ impl Default for SshState {
 
 /// Dashboard: process discovery, probing, and start/stop.
 impl SshState {
-    /// Called every tick. Scanning /proc is cheap enough to do inline; probing
-    /// is not, so it is handed to the worker and collected when it lands.
+    /// Called every tick. Process and local socket observation are cheap enough
+    /// to do inline; only SSH start/stop and remote discovery use the worker.
     pub fn poll_tunnels(&mut self) {
         for outcome in self.worker.drain() {
             match outcome {
@@ -956,9 +954,7 @@ impl SshState {
                 Outcome::Started(..) | Outcome::Stopped(..) | Outcome::StoppedOrphan(..) => {
                     // Reflect it immediately rather than waiting out the timer.
                     self.last_scan = None;
-                    self.last_probe = None;
                 }
-                Outcome::Probed(results) => self.health.extend(results),
                 Outcome::Discovered(host, found) => self.apply_discovery(host, found),
             }
         }
@@ -967,6 +963,7 @@ impl SshState {
             self.running = supervisor::scan();
             self.last_scan = Some(Instant::now());
             self.sample_meters();
+            self.refresh_health();
             // A rule with no process has nothing left to measure. Collected
             // first because `pid_at` borrows the state the retain would own.
             let live: Vec<Slot> = self
@@ -980,9 +977,8 @@ impl SshState {
             // out from under the cursor.
             self.forward_index = self.forward_index.min(self.cursor_span().saturating_sub(1));
         }
-        if due(self.last_probe, PROBE_INTERVAL) {
-            self.request_probe();
-        }
+        // Health is intentionally local-only. Do not connect to the forwarded
+        // service just to decide whether the dashboard may show its URL.
     }
 
     /// Re-read every claimed process and turn the difference into a rate.
@@ -1025,7 +1021,7 @@ impl SshState {
         self.meters.get(&pid)
     }
 
-    pub fn request_probe(&mut self) {
+    pub fn refresh_health(&mut self) {
         let rules: Vec<(Slot, Forward)> = self
             .tunnels
             .all()
@@ -1033,10 +1029,10 @@ impl SshState {
             .filter(|slot| self.pid_at(*slot).is_some())
             .filter_map(|slot| Some((slot, self.tunnels.get(slot.0, slot.1)?.clone())))
             .collect();
-        self.last_probe = Some(Instant::now());
-        if !rules.is_empty() {
-            self.worker.submit(Job::Probe(rules));
-        }
+        self.health = rules
+            .into_iter()
+            .map(|(slot, forward)| (slot, probe::observe(&forward)))
+            .collect();
     }
 
     /// The process serving the rule at `slot`, if any.
@@ -1063,9 +1059,13 @@ impl SshState {
             return;
         };
         let Some(port) = self
-            .health_at(slot)
-            .http_status
-            .and_then(|_| self.tunnels.get(slot.0, slot.1))
+            .tunnels
+            .get(slot.0, slot.1)
+            .filter(|forward| {
+                forward.protocol == Protocol::Http
+                    && forward.kind == Kind::Local
+                    && self.health_at(slot).port == Light::Ok
+            })
             .and_then(|forward| super::tunnels::port_of(&forward.bind))
         else {
             self.notify("Selected forward is not identified as HTTP");
@@ -1086,9 +1086,13 @@ impl SshState {
             return;
         };
         let Some(port) = self
-            .health_at(slot)
-            .http_status
-            .and_then(|_| self.tunnels.get(slot.0, slot.1))
+            .tunnels
+            .get(slot.0, slot.1)
+            .filter(|forward| {
+                forward.protocol == Protocol::Http
+                    && forward.kind == Kind::Local
+                    && self.health_at(slot).port == Light::Ok
+            })
             .and_then(|forward| super::tunnels::port_of(&forward.bind))
         else {
             self.notify("Selected forward is not identified as HTTP");
@@ -1283,7 +1287,7 @@ impl SshState {
     pub fn refresh_tunnels(&mut self) {
         self.running = supervisor::scan();
         self.last_scan = Some(Instant::now());
-        self.request_probe();
+        self.refresh_health();
     }
 
     /// How many rules have a process behind them.

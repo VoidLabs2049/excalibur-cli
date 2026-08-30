@@ -662,6 +662,7 @@ mod tests {
             kind: tunnels::Kind::Local,
             bind: bind.into(),
             target: "127.0.0.1:1".into(),
+            protocol: tunnels::Protocol::Tcp,
             note: String::new(),
         }
     }
@@ -681,6 +682,7 @@ mod tests {
             kind: tunnels::Kind::Local,
             bind: "22".into(),
             target: "6022".into(),
+            protocol: tunnels::Protocol::Tcp,
             note: String::new(),
         }
     }
@@ -915,6 +917,7 @@ mod tests {
             "local".into(),
             "39002".into(),
             "localhost:22".into(),
+            "TCP".into(),
             String::new(),
         ];
         module.state.apply_forward_form().unwrap();

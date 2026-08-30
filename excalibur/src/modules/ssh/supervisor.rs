@@ -264,6 +264,7 @@ pub fn stop(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::ssh::tunnels::Protocol;
 
     fn argv(line: &str) -> Vec<String> {
         line.split(' ').map(str::to_string).collect()
@@ -387,6 +388,7 @@ mod tests {
             kind: Kind::Local,
             bind: "29001".into(),
             target: "0.0.0.0:9001".into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         };
         assert!(find(&running, &forward).is_some());

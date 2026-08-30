@@ -1,5 +1,5 @@
 use super::sshconfig::{SshConfig, proxy_command_gateway_span};
-use super::tunnels::{Forward, Kind};
+use super::tunnels::{Forward, Kind, Protocol};
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use std::path::{Path, PathBuf};
@@ -905,7 +905,7 @@ mod tests {
     }
 }
 
-/// The six fields of a tunnel rule. Unlike [`HostForm`] this edits a struct we
+/// The seven fields of a tunnel rule. Unlike [`HostForm`] this edits a struct we
 /// own, so there is no file formatting to preserve -- the whole yaml is rewritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardField {
@@ -914,16 +914,18 @@ pub enum ForwardField {
     Kind,
     Bind,
     Target,
+    Protocol,
     Note,
 }
 
 impl ForwardField {
-    pub const ALL: [ForwardField; 6] = [
+    pub const ALL: [ForwardField; 7] = [
         ForwardField::Group,
         ForwardField::Host,
         ForwardField::Kind,
         ForwardField::Bind,
         ForwardField::Target,
+        ForwardField::Protocol,
         ForwardField::Note,
     ];
 
@@ -934,6 +936,7 @@ impl ForwardField {
             ForwardField::Kind => "Direction",
             ForwardField::Bind => "Listen on",
             ForwardField::Target => "Exit at",
+            ForwardField::Protocol => "Protocol",
             ForwardField::Note => "Note",
         }
     }
@@ -941,7 +944,7 @@ impl ForwardField {
     fn is_pick(self) -> bool {
         matches!(
             self,
-            ForwardField::Group | ForwardField::Host | ForwardField::Kind
+            ForwardField::Group | ForwardField::Host | ForwardField::Kind | ForwardField::Protocol
         )
     }
 
@@ -956,6 +959,7 @@ impl ForwardField {
             ForwardField::Kind => "(local or remote)",
             ForwardField::Bind => "(port, or address:port)",
             ForwardField::Target => "(host:port, resolved from the far side)",
+            ForwardField::Protocol => "(TCP, UDP, or HTTP)",
             ForwardField::Note => "(optional)",
         }
     }
@@ -985,6 +989,7 @@ impl ForwardForm {
                 forward.kind.label().to_string(),
                 forward.bind.clone(),
                 forward.target.clone(),
+                forward.protocol.label().to_string(),
                 forward.note.clone(),
             ],
             cursor: 0,
@@ -1020,7 +1025,11 @@ impl ForwardForm {
                 .unwrap_or(Kind::Local),
             bind: self.values[3].clone(),
             target: self.values[4].clone(),
-            note: self.values[5].clone(),
+            protocol: Protocol::ALL
+                .into_iter()
+                .find(|p| p.label() == self.values[5])
+                .unwrap_or_default(),
+            note: self.values[6].clone(),
         }
     }
 
@@ -1032,6 +1041,10 @@ impl ForwardForm {
         self.editing = Some(if field.is_pick() {
             let options: Vec<String> = match field {
                 ForwardField::Kind => Kind::ALL.iter().map(|k| k.label().to_string()).collect(),
+                ForwardField::Protocol => Protocol::ALL
+                    .iter()
+                    .map(|p| p.label().to_string())
+                    .collect(),
                 ForwardField::Group => groups.to_vec(),
                 _ => config
                     .hosts

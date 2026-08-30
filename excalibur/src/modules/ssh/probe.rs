@@ -1,11 +1,11 @@
-use super::tunnels::{Forward, Kind};
+#![allow(dead_code)]
+
+use super::tunnels::{Forward, Kind, Protocol};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// How long to wait for the TCP handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1200);
-/// How long to wait for the far side to drop a connection it could not complete.
 const SETTLE_TIMEOUT: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,50 @@ pub fn check(forward: &Forward) -> Health {
     }
 }
 
+/// Observe only local state. This deliberately performs no network I/O: the
+/// process scan and local socket table are enough to tell whether a forward
+/// was established without touching the service behind it.
+pub fn observe(forward: &Forward) -> Health {
+    if forward.protocol == Protocol::Udp {
+        return Health {
+            process: Light::Ok,
+            port: Light::Unknown,
+            path: Light::Unknown,
+            detail: "UDP cannot be verified through SSH TCP forwarding".to_string(),
+            http_status: None,
+        };
+    }
+    let port = bind_port(&forward.bind);
+    let listening = match (forward.kind, port) {
+        (Kind::Local, Some(port)) => listening(port),
+        _ => None,
+    };
+    Health {
+        process: Light::Ok,
+        port: listening.map_or(Light::Unknown, |up| if up { Light::Ok } else { Light::Bad }),
+        path: Light::Unknown,
+        detail: match listening {
+            Some(true) | None if forward.kind == Kind::Remote => {
+                "remote bind is not visible from this machine".to_string()
+            }
+            Some(true) => String::new(),
+            Some(false) => format!("running but nothing is listening on {}", forward.bind),
+            None => format!("cannot read a port out of `{}`", forward.bind),
+        },
+        http_status: None,
+    }
+}
+
 fn check_local(forward: &Forward) -> Health {
+    if forward.protocol == Protocol::Udp {
+        return Health {
+            process: Light::Ok,
+            port: Light::Unknown,
+            path: Light::Unknown,
+            detail: "UDP cannot be verified through SSH TCP forwarding".to_string(),
+            http_status: None,
+        };
+    }
     let Some(port) = bind_port(&forward.bind) else {
         return Health {
             process: Light::Ok,
@@ -112,7 +155,7 @@ fn check_local(forward: &Forward) -> Health {
         };
     }
 
-    let result = reachable(&format!("127.0.0.1:{port}"));
+    let result = reachable(&format!("127.0.0.1:{port}"), forward.protocol);
     let (path, detail, http_status) = match result.reach {
         Reach::Open => (Light::Ok, String::new(), result.http_status),
         Reach::Closed => (
@@ -136,9 +179,18 @@ fn check_local(forward: &Forward) -> Health {
 }
 
 fn check_remote(forward: &Forward) -> Health {
+    if forward.protocol == Protocol::Udp {
+        return Health {
+            process: Light::Ok,
+            port: Light::Unknown,
+            path: Light::Unknown,
+            detail: "UDP cannot be verified through SSH TCP forwarding".to_string(),
+            http_status: None,
+        };
+    }
     // The listening port is on the far side. What is checkable here is the exit:
     // whether the service being exposed is actually up.
-    let (path, detail) = match reachable(&forward.target).reach {
+    let (path, detail) = match reachable(&forward.target, forward.protocol).reach {
         Reach::Open => (
             Light::Ok,
             "remote bind is not visible from here; needs GatewayPorts to reach it \
@@ -181,7 +233,7 @@ fn refused() -> ReachResult {
     }
 }
 
-fn reachable(address: &str) -> ReachResult {
+fn reachable(address: &str, protocol: Protocol) -> ReachResult {
     let Ok(mut addresses) = address.to_socket_addrs() else {
         return refused();
     };
@@ -201,7 +253,10 @@ fn reachable(address: &str) -> ReachResult {
             http_status: None,
         };
     }
-    let _ = stream.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    if protocol == Protocol::Http {
+        let _ =
+            stream.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    }
     let mut response = [0u8; 16];
     let reach = match stream.read(&mut response) {
         Ok(0) => Reach::Closed,
@@ -218,7 +273,9 @@ fn reachable(address: &str) -> ReachResult {
     };
     ReachResult {
         reach,
-        http_status: parse_http_status(&response),
+        http_status: (protocol == Protocol::Http)
+            .then(|| parse_http_status(&response))
+            .flatten(),
     }
 }
 
@@ -406,7 +463,10 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
 
     #[test]
     fn a_port_nobody_serves_is_not_reachable() {
-        assert!(matches!(reachable("127.0.0.1:0").reach, Reach::Refused));
+        assert!(matches!(
+            reachable("127.0.0.1:0", Protocol::Tcp).reach,
+            Reach::Refused
+        ));
     }
 
     #[test]
@@ -421,10 +481,27 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
             }
         });
         assert!(matches!(
-            reachable(&format!("127.0.0.1:{port}")).reach,
+            reachable(&format!("127.0.0.1:{port}"), Protocol::Tcp).reach,
             Reach::Open
         ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_tcp_listener_is_checked_without_an_http_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1];
+                let read = stream.read(&mut request).unwrap();
+                assert_eq!(read, 0, "TCP probing sent an unsolicited payload");
+            }
+        });
+        let result = reachable(&format!("127.0.0.1:{port}"), Protocol::Tcp);
+        handle.join().unwrap();
+        assert!(matches!(result.reach, Reach::Open));
+        assert_eq!(result.http_status, None);
     }
 
     #[test]
@@ -439,7 +516,7 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
             }
         });
         assert!(matches!(
-            reachable(&format!("127.0.0.1:{port}")).reach,
+            reachable(&format!("127.0.0.1:{port}"), Protocol::Tcp).reach,
             Reach::Closed
         ));
         handle.join().unwrap();
@@ -462,6 +539,7 @@ tcp4       0      0  192.168.1.5.52134      17.253.144.10.443      ESTABLISHED
             kind: Kind::Local,
             bind: port.to_string(),
             target: "192.168.110.50:3000".into(),
+            protocol: Protocol::Http,
             note: String::new(),
         };
         let health = check(&forward);

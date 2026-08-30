@@ -51,17 +51,17 @@ ssh_config 提供指令补全、语法校验、遮蔽检测。
 
 ## 4. 隧道仪表盘
 
-**连通性拆三层,分开显示才有价值:**
+**状态拆两层,分开显示才有价值:**
 
 | 层 | 回答 | 怎么测 | 节奏 |
 |---|---|---|---|
 | ① 进程 | `ssh -N` 还活着吗 | procfs 扫 argv | 1s |
 | ② 绑定 | 本地端口真的 LISTEN 了吗 | `/proc/net/tcp` | 1s |
-| ③ 端到端 | 连过去对面真有东西吗 | `TcpStream::connect` 本地端口 | **后台 worker**,进入 / `r` / 每 10s |
+| ~~③ 端到端~~ | **已移除**:不主动探测远端服务 | — | — |
 
-拆开才能看出两类静默失败:**①绿②红** = 端口被占用,转发未生效;
-**①②绿③红** = 隧道通但远端服务挂了。③ 可行是因为 `-L` 是懒的 ——
-本机 accept 后才建远端连接,远端失败则连接立刻被关。
+拆开可以看出最重要的静默失败:**①绿②红** = SSH 进程还活着,但本地转发没有
+真正绑定。远端服务不做主动探测,因为用户已经明确填写目标地址和协议,且探测可能
+对 HTTP、数据库或其他服务产生副作用。
 
 **起隧道的固定形态:**
 
@@ -137,8 +137,9 @@ profiles:
   - name: daily
     forwards:
       - host: kami
-        kind: local          # local (-L) | remote (-R)
-        bind: '6022'
+         kind: local          # local (-L) | remote (-R)
+         protocol: TCP         # TCP | UDP | HTTP (default: TCP)
+         bind: '6022'
         target: localhost:22
         note: SSH_kami
 ```
@@ -155,6 +156,13 @@ profiles:
 而字段本身没有任何地方提示它需要两段 —— 所以 `problem()` 提前拦下并给出
 `localhost:6022` 这样的具体改法,`normalise_target()` 在提交时把裸端口展开成
 `localhost:<port>`,让字段显示的内容与实际命令一致。
+
+**协议类型由用户声明,不再主动猜测。** 新建或编辑转发时可选 `TCP`、`UDP`、
+`HTTP`,默认是 `TCP`;旧配置缺少 `protocol` 时也按 `TCP` 读取。这里的类型用于决定
+链接展示与界面动作:TCP 只保留本地监听状态,HTTP 提供 `o` 打开浏览器/`y` 复制地址。
+SSH `-L/-R` 本身只提供 TCP 转发,因此 UDP 目前只作为明确的类型记录,
+不会被错误地当成可验证的 TCP 服务;若要真正转发 UDP,后续需要单独接入 UDP-over-SSH
+方案(例如 `socat`/`udpgw`),不应悄悄拼进当前 SSH 命令。
 
 ## 7. 模块结构
 
@@ -195,7 +203,7 @@ CLI:`ex ssh` / 简写 `ex t`。
 ✅ tunnels.rs + 子视图 2 编辑(n 新建 / Enter 改 / d 删 / Ctrl+S 存)
    + problem() 规则校验 + 出口裸端口展开 + 方向图解
 ✅ supervisor.rs:按 argv 结构认领 + 起(-f -N)/ 停(按 pid)
-✅ probe.rs:三层灯 + 后台 worker 线程
+✅ probe.rs:进程/本地监听状态,不主动连接远端服务
 ✅ 仪表盘 a 全起 / A 全停 / r 刷新 / HTTP 服务按 `o` 打开浏览器、`y` 复制地址
 ```
 
@@ -587,6 +595,14 @@ yaml 是本工具自己写的、结构简单,风险低于 config,但值得对齐
 
 ~~**D4 · 文档**~~ —— 2026-08-29 完成。`.claude/rules/ssh.md`、CLAUDE.md 模块表与
 架构树、`docs/` 索引都已补上,即 CLAUDE.md「Adding a New Module」的第 5、6 步。
+
+### 当前边界
+
+- **协议类型由用户选择,不主动识别。** 新规则默认为 `TCP`,可选 `TCP` / `UDP` /
+  `HTTP`;其中 `HTTP` 只影响链接展示,不触发 HTTP 请求。SSH `-L/-R` 本身仍是 TCP
+  转发,`UDP` 目前只是显式记录的类型。
+- **不主动探测远端服务。** 仪表盘只观察 SSH 进程和本地 `LISTEN` 状态;HTTP URL 在
+  用户明确选择 `HTTP` 且本地转发已监听后直接展示。
 
 ### 风险点
 

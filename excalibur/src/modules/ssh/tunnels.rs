@@ -33,6 +33,37 @@ impl Kind {
     }
 }
 
+/// The service protocol the forward is expected to carry.
+///
+/// SSH local and remote forwarding are TCP transports. `Udp` is kept as an
+/// explicit declaration so the dashboard does not guess incorrectly, but it
+/// cannot be actively verified by this SSH-only module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Http,
+}
+
+impl Protocol {
+    pub const ALL: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Http];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Protocol::Tcp => "TCP",
+            Protocol::Udp => "UDP",
+            Protocol::Http => "HTTP",
+        }
+    }
+}
+
+impl Default for Protocol {
+    fn default() -> Self {
+        Self::Tcp
+    }
+}
+
 /// The path traffic takes through one forward, top to bottom.
 ///
 /// Drawn rather than described because the order is exactly what `-L` and `-R`
@@ -59,6 +90,9 @@ pub struct Forward {
     pub bind: String,
     /// Where traffic comes out: `host:port`.
     pub target: String,
+    /// What the user expects behind the TCP SSH transport.
+    #[serde(default)]
+    pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
@@ -141,7 +175,13 @@ impl Forward {
 
     /// One-line summary for the list.
     pub fn summary(&self) -> String {
-        format!("{} {} {}", self.kind.flag(), self.spec(), self.host)
+        format!(
+            "{} {} {} [{}]",
+            self.kind.flag(),
+            self.spec(),
+            self.host,
+            self.protocol.label()
+        )
     }
 
     /// Why ssh would reject this rule, if it would.
@@ -297,6 +337,7 @@ mod tests {
             kind: Kind::Local,
             bind: "29001".into(),
             target: "0.0.0.0:9001".into(),
+            protocol: Protocol::Tcp,
             note: "minio console".into(),
         }
     }
@@ -307,6 +348,7 @@ mod tests {
             kind: Kind::Remote,
             bind: "8080".into(),
             target: "localhost:3000".into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         }
     }
@@ -359,6 +401,7 @@ mod tests {
             kind: Kind::Local,
             bind: "29001".into(),
             target: "10.0.0.5:9001".into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         };
         assert_eq!(through_a_jump_host.problem(), None);
@@ -376,6 +419,7 @@ mod tests {
             kind: Kind::Local,
             bind: "29001".into(),
             target: "9001".into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         };
         let problem = rule.problem().unwrap();
@@ -411,6 +455,17 @@ mod tests {
         assert_eq!(tunnels.count(), 1);
         assert_eq!(tunnels.get(0, 0).unwrap().kind, Kind::Remote);
         assert_eq!(tunnels.get(0, 0).unwrap().note, "");
+        assert_eq!(tunnels.get(0, 0).unwrap().protocol, Protocol::Tcp);
+    }
+
+    #[test]
+    fn protocol_is_serialized_and_round_trips() {
+        let mut forward = local();
+        forward.protocol = Protocol::Http;
+        let text = serde_yaml::to_string(&forward).unwrap();
+        assert!(text.contains("protocol: HTTP"), "got: {text}");
+        let back: Forward = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(back.protocol, Protocol::Http);
     }
 
     #[test]
@@ -442,6 +497,7 @@ mod validation {
             kind: Kind::Local,
             bind: bind.into(),
             target: target.into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         }
     }
@@ -521,6 +577,7 @@ mod whose_localhost {
             kind,
             bind: "6022".into(),
             target: target.into(),
+            protocol: Protocol::Tcp,
             note: String::new(),
         }
     }

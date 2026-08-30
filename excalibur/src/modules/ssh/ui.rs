@@ -3,7 +3,7 @@ use super::form::{BlockEdit, Change, Editing, Field, ForwardField, ForwardForm, 
 use super::probe::{Health, Light};
 use super::sshconfig::HostBlock;
 use super::state::{MENU, Meter, Screen, SshState};
-use super::tunnels::Forward;
+use super::tunnels::{Forward, Protocol};
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -1229,19 +1229,18 @@ fn render_dashboard(state: &SshState, area: Rect, buf: &mut Buffer) {
             })
             .unwrap_or_default(),
     };
-    if let Some((port, status)) = state.selected_slot().and_then(|slot| {
-        let status = state.health_at(slot).http_status?;
-        let port = state
-            .tunnels
-            .get(slot.0, slot.1)
-            .and_then(|forward| super::tunnels::port_of(&forward.bind))?;
-        Some((port, status))
+    if let Some(port) = state.selected_slot().and_then(|slot| {
+        let forward = state.tunnels.get(slot.0, slot.1)?;
+        (forward.protocol == Protocol::Http
+            && forward.kind == super::tunnels::Kind::Local
+            && state.health_at(slot).port == super::probe::Light::Ok)
+            .then(|| super::tunnels::port_of(&forward.bind))?
     }) {
         if !detail.is_empty() {
             detail.push_str("   ");
         }
         detail.push_str(&format!(
-            "HTTP {status}: http://127.0.0.1:{port}   [o] open [y] copy"
+            "HTTP: http://127.0.0.1:{port}   [o] open [y] copy"
         ));
     }
     let (up, stopped, incomplete) = state.tallies();
